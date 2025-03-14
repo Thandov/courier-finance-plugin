@@ -286,8 +286,7 @@ add_action('admin_post_delete_service', 'handle_service_deletion');
  * Services list page callback
  */
 function plugin_quotations_list_page()
-{
-?>
+{ ?>
     <div class="bg-red-100">
         <?php echo kit_get_all_quotations_table(); ?>
     </div>
@@ -319,6 +318,7 @@ function quotation_insert_page()
             'discounted_cost' => floatval($_POST['discounted_cost']),
             'status' => sanitize_text_field($_POST['status']),
         );
+
 
         // Insert the quotation into the database 
         $result = kit_add_quotation($quotation_data);
@@ -353,83 +353,88 @@ function quotation_view_page()
             $wpdb->prepare("SELECT * FROM {$wpdb->prefix}kit_quotations WHERE id = %d", $quotation_id)
         );
 
+        echo '<pre>';
+        print_r($quotation);
+        echo '</pre>';
+        $subtotal = 0;
         // If quotation is found, display it
-        if ($quotation) {
-    ?>
+        if ($quotation) { ?>
+            <div class="max-w-3xl mx-auto p-6 bg-white rounded shadow-sm" id="invoice">
 
-            <div class="max-w-4xl mx-auto my-10 p-6 bg-white shadow-lg rounded-lg border border-gray-200">
-                <table class="w-full">
-                    <!-- Header Section -->
-                    <tr class="border-b border-gray-300 pb-6">
-                        <td colspan="2" class="flex justify-between">
-                            <div class="grid grid-cols-2">
-                                <div class="text-4xl font-bold text-gray-800">
-                                    <img
-                                        src="https://sparksuite.github.io/simple-html-invoice-template/images/logo.png"
-                                        alt="Company Logo"
-                                        class="w-48" />
-                                </div>
-                                <div class="text-right text-sm text-gray-600">
-                                    <p>Invoice #: <span class="font-semibold">123</span></p>
-                                    <p>Created: <span class="font-semibold">January 1, 2023</span></p>
-                                    <p>Due: <span class="font-semibold">February 1, 2023</span></p>
-                                </div>
-                            </div>
-                        </td>
-                    </tr>
+                <!-- Header -->
+                <div class="grid grid-cols-2 items-center">
+                    <div>
+                        <img src="xxxxxxx" alt="company-logo" height="80" width="80">
+                    </div>
+                    <div class="text-right">
+                        <p class="font-bold text-lg">Your Company Inc.</p>
+                        <p class="text-gray-500 text-sm">info@yourcompany.com</p>
+                        <p class="text-gray-500 text-sm">+123-456-7890</p>
+                        <p class="text-gray-500 text-sm">VAT: 123456789</p>
+                    </div>
+                </div>
 
-                    <!-- Information Section -->
-                    <tr class="border-b border-gray-300 pb-6">
-                        <td colspan="2">
-                            <div class="flex justify-between">
-                                <div class="text-sm text-gray-600">
-                                    <p class="font-semibold">Sparksuite, Inc.</p>
-                                    <p>12345 Sunny Road</p>
-                                    <p>Sunnyville, CA 12345</p>
-                                </div>
-                                <div class="text-sm text-gray-600 text-right">
-                                    <p class="font-semibold">Acme Corp.</p>
-                                    <p>John Doe</p>
-                                    <p>john@example.com</p>
-                                </div>
-                            </div>
-                        </td>
-                    </tr>
+                <!-- Client Info -->
+                <div class="grid grid-cols-2 mt-8">
+                    <div>
+                        <p class="font-bold">Bill To:</p>
+                        <p id="client-name" class="text-gray-500"><?php echo esc_html($quotation->customer_name); ?></p>
+                        <p id="client-address" class="text-gray-500"><?php echo esc_html($quotation->contact_details); ?></p>
+                        <p id="client-email" class="text-gray-500"><?php echo (isset($quotation->client_email)) ? esc_html($quotation->client_email) : 'email_address'; ?></p>
+                    </div>
+                    <div class="text-right">
+                        <p>Quotation #: <span id="invoice-number" class="text-gray-500"><?php echo (isset($quotation->quotation_number)) ? esc_html($quotation->quotation_number) : 'quotation_number'; ?></span></p>
+                        <p>Quotation Date: <span id="invoice-date" class="text-gray-500"><?php echo (isset($quotation->quotation_date)) ? esc_html($quotation->quotation_date) : 'quotation_date'; ?></span></p>
+                        <p>Due Date: <span id="due-date" class="text-gray-500"><?php echo (isset($quotation->due_date)) ? esc_html($quotation->due_date) : 'due_date'; ?></span></p>
+                    </div>
+                </div>
 
-                    <!-- Payment Method Section -->
-                    <tr class="border-b border-gray-300">
-                        <td class="font-semibold text-gray-800">Payment Method</td>
-                        <td class="font-semibold text-gray-800 text-right">Check #</td>
-                    </tr>
-                    <tr class="border-b border-gray-300">
-                        <td>Check</td>
-                        <td class="text-right">1000</td>
-                    </tr>
+                <!-- Invoice Table 11111111111 -->
+                <div class="mt-6">
+                    <table class="w-full border-collapse">
+                        <thead>
+                            <tr class="border-b">
+                                <th class="text-left py-2">Item</th>
+                                <th class="text-right py-2">Quantity</th>
+                                <th class="text-right py-2">Price</th>
+                                <th class="text-right py-2">Total</th>
+                            </tr>
+                        </thead>
+                        <tbody id="invoice-items">
+                            <?php
+                            if (isset($quotation->items)):
+                                $items = unserialize($quotation->items); // Assuming items are stored as serialized array
+                                $subtotal = 0;
+                                foreach ($items as $item) {
+                                    $total = $item['quantity'] * $item['price'];
+                                    $subtotal += $total;
+                            ?>
+                                    <tr class="border-b">
+                                        <td class="text-left py-2"><?php echo esc_html($item['name']); ?></td>
+                                        <td class="text-right py-2"><?php echo esc_html($item['quantity']); ?></td>
+                                        <td class="text-right py-2">$<?php echo number_format($item['price'], 2); ?></td>
+                                        <td class="text-right py-2">$<?php echo number_format($total, 2); ?></td>
+                                    </tr>
+                            <?php }
+                            endif;
+                            ?>
+                        </tbody>
+                    </table>
+                </div>
 
-                    <!-- Items Section -->
-                    <tr class="border-b border-gray-300">
-                        <td class="font-semibold text-gray-800">Item</td>
-                        <td class="font-semibold text-gray-800 text-right">Price</td>
-                    </tr>
-                    <tr class="border-b border-gray-200">
-                        <td>Website design</td>
-                        <td class="text-right">$300.00</td>
-                    </tr>
-                    <tr class="border-b border-gray-200">
-                        <td>Hosting (3 months)</td>
-                        <td class="text-right">$75.00</td>
-                    </tr>
-                    <tr class="border-b border-gray-200">
-                        <td>Domain name (1 year)</td>
-                        <td class="text-right">$10.00</td>
-                    </tr>
+                <!-- Totals -->
+                <div class="mt-6 text-right">
+                    <?php $tax = $subtotal * 0.15; // Assuming 15% tax 
+                    ?>
+                    <p>Subtotal: <span id="subtotal" class="text-gray-500">$<?php echo number_format($subtotal, 2); ?></span></p>
+                    <p>Tax (15%): <span id="tax" class="text-gray-500">$<?php echo number_format($tax, 2); ?></span></p>
+                    <p class="font-bold">Total: <span id="total" class="text-gray-900">$<?php echo number_format($subtotal + $tax, 2); ?></span></p>
+                </div>
 
-                    <!-- Total Section -->
-                    <tr>
-                        <td></td>
-                        <td class="font-semibold text-gray-800 border-t border-gray-300 text-right">Total: $385.00</td>
-                    </tr>
-                </table>
+                <!-- Buttons -->
+                <div class="mt-6 text-right">
+                    <button onclick="generatePDF()" class="bg-blue-600 text-white px-4 py-2 rounded">Download PDF</button>
+                </div>
             </div>
     <?php
         } else {
@@ -440,100 +445,154 @@ function quotation_view_page()
     }
 }
 
+
+function quote_instructions()
+{
+    ?>
+    <div class="bg-white p-6 rounded-lg shadow-lg space-y-6">
+        <h2 class="text-2xl font-semibold">Customer Pricing Details</h2>
+
+        <div class="space-y-4">
+            <h3 class="font-medium">Constant Costs</h3>
+            <div class="flex justify-between">
+                <span>SAD500 Fee</span>
+                <span>R350</span>
+            </div>
+            <div class="flex justify-between">
+                <span>SADC Certificate</span>
+                <span>R1000</span>
+            </div>
+            <div class="flex justify-between">
+                <span>TRA Clearing Fee (in USD)</span>
+                <span>$100</span>
+            </div>
+        </div>
+
+        <div class="space-y-4">
+            <h3 class="font-medium">Shipping Rates</h3>
+            <div class="flex flex-col space-y-2">
+                <div class="flex justify-between">
+                    <span>Weight-Based Pricing (R per kg)</span>
+                    <span>10 kg - 500 kg: R40.00</span>
+                </div>
+                <div class="flex justify-between">
+                    <span>Volume-Based Pricing (R per m³)</span>
+                    <span>0 m³ - 1 m³: R7,500</span>
+                </div>
+            </div>
+        </div>
+
+        <div class="space-y-4">
+            <h3 class="font-medium">Other Factors</h3>
+            <p>Discounts are applied based on volume. Larger volumes receive greater discounts.</p>
+        </div>
+    </div>
+
+<?php
+}
 // ✅ Reusable Quotation Form
 function quotation_form($quotation = null, $type)
 {
-    global $wpdb;
-    //$type = "add"
-
     $action = ($type === 'edit') ? 'kit_update_quotation' : 'kit_add_quotation';
     $submit_text = ($type === 'edit') ? 'Update quotation' : 'Add quotation';
     $nonce_action = ($type === 'edit') ? 'kit_edit_quotation_action' : 'kit_add_quotation_action';
     $nonce_name = ($type === 'edit') ? 'kit_quotation_nonce' : 'kit_add_quotation_nonce';
-
     ?>
-    <div class="wrap">
-        <h1>Create New Quotation</h1>
-        <form method="POST" action="<?php echo admin_url('admin-post.php'); ?>" class="space-y-4">
+        <form method="POST" id="quotationForm" action="<?php echo admin_url('admin-post.php'); ?>" class="max-w-2xl mx-auto bg-white shadow-lg rounded-lg p-6 space-y-4">
             <?php wp_nonce_field($nonce_action, $nonce_name); ?>
             <input type="hidden" name="action" value="<?php echo $action; ?>">
-            <?php if ($type === 'edit' && $quotation): ?>
-                <input type="hidden" name="quotation_id" value="<?php echo esc_attr($quotation->id); ?>">
-            <?php endif; ?>
-            <table class="form-table">
-                <tr>
-                    <th><label for="customer_name">Customer Name</label></th>
-                    <td><input type="text" name="customer_name" id="customer_name" class="regular-text" required /></td>
-                </tr>
-                <tr>
-                    <th><label for="contact_details">Contact Details</label></th>
-                    <td><input type="text" name="contact_details" id="contact_details" class="regular-text" required /></td>
-                </tr>
-                <tr>
-                    <th><label for="pickup_location">Pickup Location</label></th>
-                    <td><input type="text" name="pickup_location" id="pickup_location" class="regular-text" required /></td>
-                </tr>
-                <tr>
-                    <th><label for="delivery_location">Delivery Location</label></th>
-                    <td><input type="text" name="delivery_location" id="delivery_location" class="regular-text" required /></td>
-                </tr>
-                <tr>
-                    <th><label for="delivery_country">Delivery Country</label></th>
-                    <td><input type="text" name="delivery_country" id="delivery_country" class="regular-text" required /></td>
-                </tr>
-                <tr>
-                    <th><label for="weight_kg">Weight (kg)</label></th>
-                    <td><input type="number" name="weight_kg" id="weight_kg" step="0.01" class="regular-text" required /></td>
-                </tr>
-                <tr>
-                    <th><label for="volume_m3">Volume (m³)</label></th>
-                    <td><input type="number" name="volume_m3" id="volume_m3" step="0.01" class="regular-text" required /></td>
-                </tr>
-                <tr>
-                    <th><label for="return_load">Return Load</label></th>
-                    <td><input type="checkbox" name="return_load" id="return_load" value="1" /></td>
-                </tr>
-                <tr>
-                    <th><label for="special_requirements">Special Requirements</label></th>
-                    <td><input type="text" name="special_requirements" id="special_requirements" class="regular-text" /></td>
-                </tr>
-                <tr>
-                    <th><label for="weight_cost">Weight Cost</label></th>
-                    <td><input type="number" name="weight_cost" id="weight_cost" step="0.01" class="regular-text" required /></td>
-                </tr>
-                <tr>
-                    <th><label for="volume_cost">Volume Cost</label></th>
-                    <td><input type="number" name="volume_cost" id="volume_cost" step="0.01" class="regular-text" required /></td>
-                </tr>
-                <tr>
-                    <th><label for="final_cost">Final Cost</label></th>
-                    <td><input type="number" name="final_cost" id="final_cost" step="0.01" class="regular-text" required /></td>
-                </tr>
-                <tr>
-                    <th><label for="additional_fees">Additional Fees</label></th>
-                    <td><input type="number" name="additional_fees" id="additional_fees" step="0.01" class="regular-text" /></td>
-                </tr>
-                <tr>
-                    <th><label for="total_cost">Total Cost</label></th>
-                    <td><input type="number" name="total_cost" id="total_cost" step="0.01" class="regular-text" required /></td>
-                </tr>
-                <tr>
-                    <th><label for="discount_percent">Discount Percent</label></th>
-                    <td><input type="number" name="discount_percent" id="discount_percent" step="0.01" class="regular-text" /></td>
-                </tr>
-                <tr>
-                    <th><label for="discounted_cost">Discounted Cost</label></th>
-                    <td><input type="number" name="discounted_cost" id="discounted_cost" step="0.01" class="regular-text" /></td>
-                </tr>
-                <tr>
-                    <th><label for="status">Status</label></th>
-                    <td><input type="text" name="status" id="status" value="Pending" class="regular-text" /></td>
-                </tr>
-            </table>
-            <p class="submit">
-                <input type="submit" name="submit_quotation" id="submit_quotation" class="button-primary" value="Save Quotation" />
-            </p>
+
+            <h2 class="text-2xl font-bold text-gray-700">Get a Shipping Quote</h2>
+
+            <!-- Customer & Shipment Details -->
+            <div class="space-y-2">
+                <label class="block text-sm font-medium text-gray-600">Name</label>
+                <input type="text" name="customer_name" class="w-full p-2 border rounded-lg" placeholder="Enter your name" required>
+            </div>
+
+            <div class="space-y-2">
+                <label class="block text-sm font-medium text-gray-600">Email</label>
+                <input type="email" name="customer_email" class="w-full p-2 border rounded-lg" placeholder="Enter your email" required>
+            </div>
+
+            <div class="space-y-2">
+                <label class="block text-sm font-medium text-gray-600">Phone</label>
+                <input type="tel" name="customer_phone" class="w-full p-2 border rounded-lg" placeholder="Enter your phone number" required>
+            </div>
+
+            <!-- Shipping Method Selection -->
+            <div class="mt-4">
+                <h3 class="text-lg font-semibold">Shipping Method</h3>
+                <div class="flex space-x-4">
+                    <label class="flex items-center space-x-2">
+                        <input type="radio" name="shipping_method" value="weight" class="form-radio" checked>
+                        <span>Weight-Based</span>
+                    </label>
+                    <label class="flex items-center space-x-2">
+                        <input type="radio" name="shipping_method" value="volume" class="form-radio">
+                        <span>Volume-Based</span>
+                    </label>
+                </div>
+            </div>
+
+            <!-- Weight-Based Input -->
+            <div id="weightInput" class="mt-4">
+                <label class="block text-sm font-medium text-gray-600">Weight (kg)</label>
+                <input type="number" name="weight" min="1" class="w-full p-2 border rounded-lg" placeholder="Enter weight in kg">
+            </div>
+
+            <!-- Volume-Based Input -->
+            <div id="volumeInput" class="hidden mt-4">
+                <label class="block text-sm font-medium text-gray-600">Dimensions (m)</label>
+                <div class="grid grid-cols-3 gap-2">
+                    <input type="number" name="length" placeholder="Length" class="p-2 border rounded-lg">
+                    <input type="number" name="width" placeholder="Width" class="p-2 border rounded-lg">
+                    <input type="number" name="height" placeholder="Height" class="p-2 border rounded-lg">
+                </div>
+            </div>
+
+            <!-- Additional Fees (Auto-Calculated) -->
+            <div class="mt-4">
+                <label class="flex items-center space-x-2">
+                    <input type="checkbox" name="include_sad500" class="form-checkbox" checked>
+                    <span>Include SAD500 Fee (R350)</span>
+                </label>
+                <label class="flex items-center space-x-2">
+                    <input type="checkbox" name="include_sadc" class="form-checkbox" checked>
+                    <span>Include SADC Certificate (R1000)</span>
+                </label>
+            </div>
+
+            <!-- Return Load Discount -->
+            <div class="mt-4">
+                <label class="flex items-center space-x-2">
+                    <input type="checkbox" name="return_load" class="form-checkbox">
+                    <span>Apply Return Load Discount</span>
+                </label>
+            </div>
+
+            <!-- Submit Button -->
+            <button type="submit" class="w-full bg-blue-600 text-white p-2 rounded-lg mt-4">Get Quote</button>
         </form>
-    </div>
-<?php
+
+        <script>
+            document.addEventListener('DOMContentLoaded', function() {
+                const weightInput = document.getElementById('weightInput');
+                const volumeInput = document.getElementById('volumeInput');
+                const shippingMethods = document.querySelectorAll('input[name="shipping_method"]');
+
+                shippingMethods.forEach(method => {
+                    method.addEventListener('change', function() {
+                        if (this.value === 'weight') {
+                            weightInput.classList.remove('hidden');
+                            volumeInput.classList.add('hidden');
+                        } else {
+                            weightInput.classList.add('hidden');
+                            volumeInput.classList.remove('hidden');
+                        }
+                    });
+                });
+            });
+        </script>
+    <?php
 }

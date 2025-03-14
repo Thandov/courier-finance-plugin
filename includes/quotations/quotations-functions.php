@@ -9,47 +9,92 @@ $table_quotations = $wpdb->prefix . "kit_quotations";
 // ✅ Handle quotation data processing
 function kit_handle_quotation_data($request_type = 'POST')
 {
+    unset($_POST['include_sad500']);
+    unset($_POST['include_sadc_certificate']);
+
     $request_data = ($request_type === 'POST') ? $_POST : $_GET;
+
+    // Get the values from the form (sanitized)
+    $weightKg = isset($request_data['weight_kg']) ? floatval($request_data['weight_kg']) : 0;
+    $volumeM3 = isset($request_data['volume_m3']) ? floatval($request_data['volume_m3']) : 0;
+    $additionalFees = isset($request_data['additional_fees']) ? floatval($request_data['additional_fees']) : 0;
+    $discountPercent = isset($request_data['discount_percent']) ? floatval($request_data['discount_percent']) : 0;
+
+    // Define the constant costs
+    $sad500Fee = 350; // R350
+    $sadcCertificateFee = 1000; // R1000
+    $traClearingFee = 100 * 18; // $100 converted to R18 (assuming $1 = R18)
+
+    // Get the values of the checkboxes
+    $includeSAD500 = isset($request_data['include_sad500']) && $request_data['include_sad500'] == 'on';
+    $includeSADC = isset($request_data['include_sadc_certificate']) && $request_data['include_sadc_certificate'] == 'on';
+    $includeTRA = isset($request_data['include_tra_clearing_fee']) && $request_data['include_tra_clearing_fee'] == 'on';
+
+    // Base cost calculation (for example, based on weight and volume)
+    $baseCost = 0;
+
+    if ($weightKg > 0) {
+        // Weight-based cost calculation
+        if ($weightKg <= 500) $baseCost = $weightKg * 40;
+        elseif ($weightKg <= 1000) $baseCost = $weightKg * 35;
+        elseif ($weightKg <= 2500) $baseCost = $weightKg * 30;
+        elseif ($weightKg <= 5000) $baseCost = $weightKg * 25;
+        elseif ($weightKg <= 7500) $baseCost = $weightKg * 20;
+        elseif ($weightKg <= 10000) $baseCost = $weightKg * 17.5;
+        else $baseCost = $weightKg * 15;
+    } elseif ($volumeM3 > 0) {
+        // Volume-based cost calculation
+        if ($volumeM3 <= 1) $baseCost = 7500;
+        elseif ($volumeM3 <= 2) $baseCost = 7000;
+        elseif ($volumeM3 <= 5) $baseCost = 6500;
+        elseif ($volumeM3 <= 10) $baseCost = 5500;
+        elseif ($volumeM3 <= 15) $baseCost = 5000;
+        elseif ($volumeM3 <= 20) $baseCost = 4500;
+        elseif ($volumeM3 <= 30) $baseCost = 4000;
+        else $baseCost = 3500;
+    }
+
+    // Calculate weight_cost and volume_cost
+    $weightCost = $weightKg > 0 ? $baseCost : 0;
+    $volumeCost = $volumeM3 > 0 && $weightKg == 0 ? $baseCost : 0;
+
+    // Add the additional fees to the base cost
+    $totalCost = $baseCost + $additionalFees;
+
+    // Add the constant costs if selected
+    if ($includeSAD500) $totalCost += $sad500Fee;
+    if ($includeSADC) $totalCost += $sadcCertificateFee;
+    if ($includeTRA) $totalCost += $traClearingFee;
+
+    // Apply the discount if applicable
+    $discountAmount = ($totalCost * $discountPercent) / 100;
+    $discountedCost = $totalCost - $discountAmount;
+
     return [
-        'customer_name' => isset($request_data['customer_name']) ? sanitize_text_field($request_data['customer_name']) : ' ',
-        'contact_details' => isset($request_data['contact_details']) ? sanitize_text_field($request_data['contact_details']) : ' ',
-        'pickup_location' => isset($request_data['pickup_location']) ? sanitize_text_field($request_data['pickup_location']) : ' ',
-        'delivery_location' => isset($request_data['delivery_location']) ? sanitize_text_field($request_data['delivery_location']) : ' ',
-        'delivery_country' => isset($request_data['delivery_country']) ? floatval($request_data['delivery_country']) : ' ',
-        'weight_kg' => isset($request_data['weight_kg']) ? floatval($request_data['weight_kg']) : ' ',
-        'volume_m3' => isset($request_data['volume_m3']) ? floatval($request_data['volume_m3']) : ' ',
-        'return_load' => isset($request_data['return_load']) ? sanitize_text_field($request_data['return_load']) : ' ',
-        'special_requirements' => isset($request_data['special_requirements']) ? sanitize_text_field($request_data['special_requirements']) : ' ',
-        'weight_cost' => isset($request_data['weight_cost']) ? floatval($request_data['weight_cost']) : ' ',
-        'volume_cost' => isset($request_data['volume_cost']) ? floatval($request_data['volume_cost']) : ' ',
-        'final_cost' => isset($request_data['final_cost']) ? floatval($request_data['final_cost']) : ' ',
-        'additional_fees' => isset($request_data['additional_fees']) ? floatval($request_data['additional_fees']) : ' ',
-        'total_cost' => isset($request_data['total_cost']) ? floatval($request_data['total_cost']) : ' ',
-        'discount_percent' => isset($request_data['discount_percent']) ? floatval($request_data['discount_percent']) : ' ',
-        'discounted_cost' => isset($request_data['discounted_cost']) ? floatval($request_data['discounted_cost']) : ' ',
-        'status' => isset($request_data['status']) ? sanitize_text_field($request_data['status']) : ' ',
+        'customer_name' => isset($request_data['customer_name']) ? sanitize_text_field($request_data['customer_name']) : '',
+        'contact_details' => isset($request_data['contact_details']) ? sanitize_text_field($request_data['contact_details']) : '',
+        'pickup_location' => isset($request_data['pickup_location']) ? sanitize_text_field($request_data['pickup_location']) : '',
+        'delivery_location' => isset($request_data['delivery_location']) ? sanitize_text_field($request_data['delivery_location']) : '',
+        'delivery_country' => isset($request_data['delivery_country']) ? sanitize_text_field($request_data['delivery_country']) : '',
+        'weight_kg' => $weightKg,
+        'volume_m3' => $volumeM3,
+        'return_load' => isset($request_data['return_load']) ? floatval($request_data['return_load']) : '',
+        'special_requirements' => isset($request_data['special_requirements']) ? sanitize_text_field($request_data['special_requirements']) : '',
+        'weight_cost' => $weightCost,
+        'volume_cost' => $volumeCost,
+        'final_cost' => $discountedCost, // Assuming final_cost = discounted cost
+        'additional_fees' => $additionalFees,
+        'total_cost' => $totalCost,
+        'discount_percent' => $discountPercent,
+        'discounted_cost' => $discountedCost,
+        'status' => isset($request_data['status']) ? sanitize_text_field($request_data['status']) : '',
     ];
-    
-   
 }
 
-// ✅ Check if quotation exists (by customer name and email)
-function kit_quotation_exists($customer_name, $customer_email)
-{
-    global $wpdb, $table_quotations;
-    $query = $wpdb->prepare("SELECT COUNT(*) FROM $table_quotations WHERE customer_name = %s AND customer_email = %s", $customer_name, $customer_email);
-    return ($wpdb->get_var($query) > 0);
-}
-
-// ✅ Get all quotations
-function kit_get_all_quotations()
-{
-    global $wpdb, $table_quotations;
-    return $wpdb->get_results("SELECT * FROM $table_quotations", ARRAY_A);
-}
 
 // ✅ Add Quotation
 add_action('admin_post_kit_add_quotation', 'kit_add_quotation');
+
 function kit_add_quotation()
 {
 
@@ -59,7 +104,10 @@ function kit_add_quotation()
     if (!current_user_can('manage_options')) {
         wp_die('Unauthorized');
     }
-
+echo '<pre>';
+print_r($_POST);
+echo '</pre>';
+exit();
     global $wpdb, $table_quotations;
     $data = kit_handle_quotation_data('POST');
 
@@ -68,11 +116,17 @@ function kit_add_quotation()
     }
 
     //xxxxxxxxxx
-    $wpdb->insert($table_quotations, $data, ['%s', '%s', '%s', '%s', '%f', '%f', '%f', '%s', '%s', '%f', '%f', '%f', '%f', '%f', '%f', '%f', '%s']);
+    $wpdb->insert($table_quotations, $data, ['%s', '%s', '%s', '%s', '%s', '%f', '%f', '%s', '%s', '%f', '%f', '%f', '%f', '%f', '%f', '%f', '%s']);
     $last_inserted_id = $wpdb->insert_id;
-
     wp_redirect(admin_url('admin.php?page=kit-quotation-edit&quotation_id=' . $last_inserted_id . '&message=success'));
     exit;
+}
+
+// ✅ Get all quotations
+function kit_get_all_quotations()
+{
+    global $wpdb, $table_quotations;
+    return $wpdb->get_results("SELECT * FROM $table_quotations", ARRAY_A);
 }
 
 // ✅ Get Quotation by ID
