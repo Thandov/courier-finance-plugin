@@ -684,11 +684,11 @@ function quotation_form($quotation = null, $type)
         <div class="space-y-4 mt-6">
             <h3 class="text-lg font-semibold">Additional Fees</h3>
             <label class="flex items-center space-x-2">
-                <input type="checkbox" name="include_sad500" class="form-checkbox" checked>
+                <input type="checkbox" name="include_sad500" class="form-checkbox">
                 <span>Include SAD500 Fee (R350)</span>
             </label>
             <label class="flex items-center space-x-2">
-                <input type="checkbox" name="include_sadc" class="form-checkbox" checked>
+                <input type="checkbox" name="include_sadc" class="form-checkbox">
                 <span>Include SADC Certificate (R1000)</span>
             </label>
         </div>
