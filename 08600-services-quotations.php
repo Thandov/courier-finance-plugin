@@ -290,7 +290,7 @@ function plugin_quotations_list_page()
     <div class="bg-red-100">
         <?php echo kit_get_all_quotations_table(); ?>
     </div>
-    <?php
+<?php
 }
 
 // Function to display the form and handle the form submission
@@ -343,112 +343,175 @@ add_action('init', 'register_quotation_insert_page');
 // Function to display a specific quotation
 function quotation_view_page()
 {
-    // Check if ID is set in the URL
-    if (isset($_GET['quotation_id'])) {
-        $quotation_id = intval($_GET['quotation_id']); // Sanitize the ID
-        global $wpdb;
+    if (!isset($_GET['quotation_id'])) {
+        echo '<div class="error"><p>Quotation ID is missing.</p></div>';
+        return;
+    }
 
-        // Query to get the quotation from the database
-        $quotation = $wpdb->get_row(
-            $wpdb->prepare("SELECT * FROM {$wpdb->prefix}kit_quotations WHERE id = %d", $quotation_id)
-        );
+    $quotation_id = intval($_GET['quotation_id']);
+    global $wpdb;
+    $table_name = $wpdb->prefix . 'kit_quotations';
 
-        echo '<pre>';
-        print_r($quotation);
-        echo '</pre>';
-        $subtotal = 0;
-        // If quotation is found, display it
-        if ($quotation) { ?>
-            <div class="max-w-3xl mx-auto p-6 bg-white rounded shadow-sm" id="invoice">
+    $quotation = $wpdb->get_row(
+        $wpdb->prepare("SELECT * FROM $table_name WHERE id = %d", $quotation_id)
+    );
 
-                <!-- Header -->
-                <div class="grid grid-cols-2 items-center">
-                    <div>
-                        <img src="xxxxxxx" alt="company-logo" height="80" width="80">
-                    </div>
-                    <div class="text-right">
-                        <p class="font-bold text-lg">Your Company Inc.</p>
-                        <p class="text-gray-500 text-sm">info@yourcompany.com</p>
-                        <p class="text-gray-500 text-sm">+123-456-7890</p>
-                        <p class="text-gray-500 text-sm">VAT: 123456789</p>
-                    </div>
+    if (!$quotation) {
+        echo '<div class="error"><p>Quotation not found.</p></div>';
+        return;
+    }
+
+    // Calculate totals from stored values
+    $subtotal = $quotation->sub_total;
+    $final_cost = $quotation->final_cost;
+    $tax = $final_cost - $subtotal; // Assuming tax is included in final cost
+?>
+
+    <div class="max-w-4xl mx-auto bg-white rounded-xl shadow-lg overflow-hidden">
+        <!-- Header Section -->
+        <div class="bg-gradient-to-r from-blue-600 to-blue-400 p-8">
+            <h1 class="text-4xl font-bold text-white">QUOTATION</h1>
+            <div class="mt-4 flex justify-between text-blue-100">
+                <div>
+                    <p class="font-semibold">Quotation #: <?php echo $quotation->id; ?></p>
+                    <p>Date: <?php echo date('F d, Y', strtotime($quotation->date_created)); ?></p>
                 </div>
-
-                <!-- Client Info -->
-                <div class="grid grid-cols-2 mt-8">
-                    <div>
-                        <p class="font-bold">Bill To:</p>
-                        <p id="client-name" class="text-gray-500"><?php echo esc_html($quotation->customer_name); ?></p>
-                        <p id="client-address" class="text-gray-500"><?php echo esc_html($quotation->contact_details); ?></p>
-                        <p id="client-email" class="text-gray-500"><?php echo (isset($quotation->client_email)) ? esc_html($quotation->client_email) : 'email_address'; ?></p>
-                    </div>
-                    <div class="text-right">
-                        <p>Quotation #: <span id="invoice-number" class="text-gray-500"><?php echo (isset($quotation->quotation_number)) ? esc_html($quotation->quotation_number) : 'quotation_number'; ?></span></p>
-                        <p>Quotation Date: <span id="invoice-date" class="text-gray-500"><?php echo (isset($quotation->quotation_date)) ? esc_html($quotation->quotation_date) : 'quotation_date'; ?></span></p>
-                        <p>Due Date: <span id="due-date" class="text-gray-500"><?php echo (isset($quotation->due_date)) ? esc_html($quotation->due_date) : 'due_date'; ?></span></p>
-                    </div>
-                </div>
-
-                <!-- Invoice Table 11111111111 -->
-                <div class="mt-6">
-                    <table class="w-full border-collapse">
-                        <thead>
-                            <tr class="border-b">
-                                <th class="text-left py-2">Item</th>
-                                <th class="text-right py-2">Quantity</th>
-                                <th class="text-right py-2">Price</th>
-                                <th class="text-right py-2">Total</th>
-                            </tr>
-                        </thead>
-                        <tbody id="invoice-items">
-                            <?php
-                            if (isset($quotation->items)):
-                                $items = unserialize($quotation->items); // Assuming items are stored as serialized array
-                                $subtotal = 0;
-                                foreach ($items as $item) {
-                                    $total = $item['quantity'] * $item['price'];
-                                    $subtotal += $total;
-                            ?>
-                                    <tr class="border-b">
-                                        <td class="text-left py-2"><?php echo esc_html($item['name']); ?></td>
-                                        <td class="text-right py-2"><?php echo esc_html($item['quantity']); ?></td>
-                                        <td class="text-right py-2">$<?php echo number_format($item['price'], 2); ?></td>
-                                        <td class="text-right py-2">$<?php echo number_format($total, 2); ?></td>
-                                    </tr>
-                            <?php }
-                            endif;
-                            ?>
-                        </tbody>
-                    </table>
-                </div>
-
-                <!-- Totals -->
-                <div class="mt-6 text-right">
-                    <?php $tax = $subtotal * 0.15; // Assuming 15% tax 
-                    ?>
-                    <p>Subtotal: <span id="subtotal" class="text-gray-500">$<?php echo number_format($subtotal, 2); ?></span></p>
-                    <p>Tax (15%): <span id="tax" class="text-gray-500">$<?php echo number_format($tax, 2); ?></span></p>
-                    <p class="font-bold">Total: <span id="total" class="text-gray-900">$<?php echo number_format($subtotal + $tax, 2); ?></span></p>
-                </div>
-
-                <!-- Buttons -->
-                <div class="mt-6 text-right">
-                    <button onclick="generatePDF()" class="bg-blue-600 text-white px-4 py-2 rounded">Download PDF</button>
+                <div class="text-right">
+                    <p>Valid Until: <?php echo date('F d, Y', strtotime('+7 days')); ?></p>
                 </div>
             </div>
+        </div>
+
+        <!-- Company & Client Info -->
+        <div class="grid grid-cols-2 gap-8 p-8 border-b">
+            <!-- Left Column - Company Details -->
+            <div class="space-y-2">
+                <div class="items-center mb-4">
+                    <img class="w-[150px]" src="<?php echo plugin_dir_url(__FILE__) . 'img/logo.png'; ?>" alt="Logo">
+                    <h2 class="text-xl font-bold text-gray-800">08600 Logistics</h2>
+                </div>
+                <p class="text-gray-600">123 Business Street</p>
+                <p class="text-gray-600">Johannesburg, 2000</p>
+                <p class="text-gray-600">South Africa</p>
+                <div class="mt-4">
+                    <p class="text-blue-600">Tel: +27 11 123 4567</p>
+                    <p class="text-blue-600">Email: info@08600.co.za</p>
+                    <p class="text-blue-600">VAT: 123456789</p>
+                </div>
+            </div>
+
+            <!-- Right Column - Bill To -->
+            <div class="bg-gray-50 p-6 rounded-lg">
+                <h3 class="text-lg font-semibold text-gray-700 mb-4">BILL TO</h3>
+                <p class="font-medium text-gray-800"><?php echo $quotation->customer_name; ?></p>
+                <p class="text-gray-600"><?php echo nl2br(esc_html($quotation->sender_address)); ?></p>
+                <div class="mt-3">
+                    <p class="text-sm text-gray-600">
+                        <span class="font-medium">Email:</span> <?php echo $quotation->customer_email; ?>
+                    </p>
+                    <p class="text-sm text-gray-600">
+                        <span class="font-medium">Phone:</span> <?php echo $quotation->customer_phone; ?>
+                    </p>
+                </div>
+            </div>
+        </div>
+
+        <!-- Items Table -->
+        <div class="px-8 py-6">
+            <table class="w-full">
+                <thead class="bg-gray-50">
+                    <tr>
+                        <th class="text-left py-4 px-4 font-semibold text-gray-700">DESCRIPTION</th>
+                        <th class="text-right py-4 px-4 font-semibold text-gray-700">AMOUNT (ZAR)</th>
+                    </tr>
+                </thead>
+                <tbody class="divide-y divide-gray-200">
+                    <!-- Base Shipping -->
+                    <tr class="hover:bg-gray-50">
+                        <td class="py-4 px-4">
+                            <p class="font-medium text-gray-800"><?php echo strtoupper($quotation->shipping_method); ?>-BASED SHIPPING</p>
+                            <?php if ($quotation->shipping_method === 'weight') : ?>
+                                <p class="text-sm text-gray-600"><?php echo $quotation->weight; ?> kg</p>
+                            <?php else : ?>
+                                <p class="text-sm text-gray-600">Dimensions: <?php echo $quotation->length; ?>m × <?php echo $quotation->width; ?>m × <?php echo $quotation->height; ?>m</p>
+                            <?php endif; ?>
+                        </td>
+                        <td class="py-4 px-4 text-right">R <?php echo number_format($quotation->sub_total, 2); ?></td>
+                    </tr>
+
+                    <!-- Additional Fees -->
+                    <?php if ($quotation->include_sad500) : ?>
+                        <tr class="hover:bg-gray-50">
+                            <td class="py-4 px-4 text-gray-600">SAD500 Documentation Fee</td>
+                            <td class="py-4 px-4 text-right">R 350.00</td>
+                        </tr>
+                    <?php endif; ?>
+
+                    <?php if ($quotation->include_sadc) : ?>
+                        <tr class="hover:bg-gray-50">
+                            <td class="py-4 px-4 text-gray-600">SADC Certificate</td>
+                            <td class="py-4 px-4 text-right">R 1000.00</td>
+                        </tr>
+                    <?php endif; ?>
+
+                    <!-- Discount -->
+                    <?php if ($quotation->return_load) : ?>
+                        <tr class="hover:bg-gray-50 bg-blue-50">
+                            <td class="py-4 px-4 text-blue-600 font-medium">Return Load Discount (10%)</td>
+                            <td class="py-4 px-4 text-right text-blue-600">- R <?php echo number_format($quotation->sub_total * 0.1, 2); ?></td>
+                        </tr>
+                    <?php endif; ?>
+                </tbody>
+            </table>
+
+            <!-- Total Section -->
+            <div class="mt-8 flex justify-end">
+                <div class="w-64">
+                    <div class="flex justify-between items-center mb-2">
+                        <span class="font-medium text-gray-700">Subtotal:</span>
+                        <span class="text-gray-600">R <?php echo number_format($quotation->sub_total, 2); ?></span>
+                    </div>
+                    <div class="flex justify-between items-center mb-2">
+                        <span class="font-medium text-gray-700">Total:</span>
+                        <span class="text-xl font-bold text-blue-600">R <?php echo number_format($quotation->final_cost, 2); ?></span>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Footer Notes -->
+        <div class="bg-gray-50 p-8 border-t">
+            <div class="grid grid-cols-2 gap-8">
+                <div class="text-sm text-gray-600">
+                    <p class="font-medium mb-2">Payment Details:</p>
+                    <p>Bank: Standard Bank</p>
+                    <p>Account: 123 456 789</p>
+                    <p>Branch: 000000</p>
+                </div>
+                <div class="text-sm text-gray-600">
+                    <p class="font-medium mb-2">Notes:</p>
+                    <p>Payment due within 14 days</p>
+                    <p>VAT included where applicable</p>
+                </div>
+            </div>
+        </div>
+
+        <!-- Action Buttons -->
+        <div class="mt-8 text-right">
+            <a href="<?php echo plugins_url('pdf-generator.php', __FILE__); ?>?quotation_id=<?php echo $quotation_id; ?>"
+                class="bg-blue-600 text-white px-4 py-2 rounded">
+                Download PDF
+            </a>
+        </div>
+    </div>
+
     <?php
-        } else {
-            echo '<div class="error"><p>Quotation not found.</p></div>';
-        }
-    } else {
-        echo '<div class="error"><p>Quotation ID is missing.</p></div>';
-    }
 }
 
 
 function quote_instructions()
 {
-    ?>
+    ?>§
     <div class="bg-white p-6 rounded-lg shadow-lg space-y-6">
         <h2 class="text-2xl font-semibold">Customer Pricing Details</h2>
 
@@ -497,14 +560,16 @@ function quotation_form($quotation = null, $type)
     $submit_text = ($type === 'edit') ? 'Update quotation' : 'Add quotation';
     $nonce_action = ($type === 'edit') ? 'kit_edit_quotation_action' : 'kit_add_quotation_action';
     $nonce_name = ($type === 'edit') ? 'kit_quotation_nonce' : 'kit_add_quotation_nonce';
-    ?>
-        <form method="POST" id="quotationForm" action="<?php echo admin_url('admin-post.php'); ?>" class="max-w-2xl mx-auto bg-white shadow-lg rounded-lg p-6 space-y-4">
-            <?php wp_nonce_field($nonce_action, $nonce_name); ?>
-            <input type="hidden" name="action" value="<?php echo $action; ?>">
+?>
+    <form method="POST" id="quotationForm" action="<?php echo admin_url('admin-post.php'); ?>" class="max-w-2xl mx-auto bg-white shadow-lg rounded-lg p-6 space-y-4">
+        <?php wp_nonce_field($nonce_action, $nonce_name); ?>
+        <input type="hidden" name="action" value="<?php echo $action; ?>">
 
-            <h2 class="text-2xl font-bold text-gray-700">Get a Shipping Quote</h2>
+        <h2 class="text-2xl font-bold text-gray-700">Get a Shipping Quote</h2>
 
-            <!-- Customer & Shipment Details -->
+        <!-- Customer Information -->
+        <div class="space-y-4">
+            <h3 class="text-lg font-semibold">Your Information</h3>
             <div class="space-y-2">
                 <label class="block text-sm font-medium text-gray-600">Name</label>
                 <input type="text" name="customer_name" class="w-full p-2 border rounded-lg" placeholder="Enter your name" required>
@@ -519,10 +584,73 @@ function quotation_form($quotation = null, $type)
                 <label class="block text-sm font-medium text-gray-600">Phone</label>
                 <input type="tel" name="customer_phone" class="w-full p-2 border rounded-lg" placeholder="Enter your phone number" required>
             </div>
+        </div>
+
+        <!-- Sender Information -->
+        <div class="space-y-4 mt-6">
+            <h3 class="text-lg font-semibold">Sender Information</h3>
+            <div class="space-y-2">
+                <label class="block text-sm font-medium text-gray-600">Sender Name</label>
+                <input type="text" name="sender_name" class="w-full p-2 border rounded-lg" placeholder="Sender's name" required>
+            </div>
+
+            <div class="space-y-2">
+                <label class="block text-sm font-medium text-gray-600">Sender Email</label>
+                <input type="email" name="sender_email" class="w-full p-2 border rounded-lg" placeholder="Sender's email" required>
+            </div>
+
+            <div class="space-y-2">
+                <label class="block text-sm font-medium text-gray-600">Sender Phone</label>
+                <input type="tel" name="sender_phone" class="w-full p-2 border rounded-lg" placeholder="Sender's phone number" required>
+            </div>
+
+            <div class="space-y-2">
+                <label class="block text-sm font-medium text-gray-600">Sender Address</label>
+                <textarea name="sender_address" class="w-full p-2 border rounded-lg" placeholder="Full sender address" required></textarea>
+            </div>
+        </div>
+
+        <!-- Receiver Information -->
+        <div class="space-y-4 mt-6">
+            <h3 class="text-lg font-semibold">Receiver Information</h3>
+            <div class="space-y-2">
+                <label class="block text-sm font-medium text-gray-600">Receiver Name</label>
+                <input type="text" name="receiver_name" class="w-full p-2 border rounded-lg" placeholder="Receiver's name" required>
+            </div>
+
+            <div class="space-y-2">
+                <label class="block text-sm font-medium text-gray-600">Receiver Email</label>
+                <input type="email" name="receiver_email" class="w-full p-2 border rounded-lg" placeholder="Receiver's email" required>
+            </div>
+
+            <div class="space-y-2">
+                <label class="block text-sm font-medium text-gray-600">Receiver Phone</label>
+                <input type="tel" name="receiver_phone" class="w-full p-2 border rounded-lg" placeholder="Receiver's phone number" required>
+            </div>
+
+            <div class="space-y-2">
+                <label class="block text-sm font-medium text-gray-600">Receiver Address</label>
+                <textarea name="receiver_address" class="w-full p-2 border rounded-lg" placeholder="Full receiver address" required></textarea>
+            </div>
+        </div>
+
+        <!-- Shipping Details -->
+        <div class="space-y-4 mt-6">
+            <h3 class="text-lg font-semibold">Shipping Details</h3>
+
+            <div class="space-y-2">
+                <label class="block text-sm font-medium text-gray-600">Send Location</label>
+                <input type="text" name="send_location" class="w-full p-2 border rounded-lg" placeholder="Where is the package being sent from?" required>
+            </div>
+
+            <div class="space-y-2">
+                <label class="block text-sm font-medium text-gray-600">Delivery Address</label>
+                <textarea name="delivery_address" class="w-full p-2 border rounded-lg" placeholder="Full delivery address" required></textarea>
+            </div>
 
             <!-- Shipping Method Selection -->
             <div class="mt-4">
-                <h3 class="text-lg font-semibold">Shipping Method</h3>
+                <h4 class="text-md font-medium">Shipping Method</h4>
                 <div class="flex space-x-4">
                     <label class="flex items-center space-x-2">
                         <input type="radio" name="shipping_method" value="weight" class="form-radio" checked>
@@ -538,61 +666,63 @@ function quotation_form($quotation = null, $type)
             <!-- Weight-Based Input -->
             <div id="weightInput" class="mt-4">
                 <label class="block text-sm font-medium text-gray-600">Weight (kg)</label>
-                <input type="number" name="weight" min="1" class="w-full p-2 border rounded-lg" placeholder="Enter weight in kg">
+                <input type="number" name="weight" min="0.1" step="0.1" class="w-full p-2 border rounded-lg" placeholder="Enter weight in kg">
             </div>
 
             <!-- Volume-Based Input -->
             <div id="volumeInput" class="hidden mt-4">
                 <label class="block text-sm font-medium text-gray-600">Dimensions (m)</label>
                 <div class="grid grid-cols-3 gap-2">
-                    <input type="number" name="length" placeholder="Length" class="p-2 border rounded-lg">
-                    <input type="number" name="width" placeholder="Width" class="p-2 border rounded-lg">
-                    <input type="number" name="height" placeholder="Height" class="p-2 border rounded-lg">
+                    <input type="number" name="length" min="0.1" step="0.01" placeholder="Length" class="p-2 border rounded-lg">
+                    <input type="number" name="width" min="0.1" step="0.01" placeholder="Width" class="p-2 border rounded-lg">
+                    <input type="number" name="height" min="0.1" step="0.01" placeholder="Height" class="p-2 border rounded-lg">
                 </div>
             </div>
+        </div>
 
-            <!-- Additional Fees (Auto-Calculated) -->
-            <div class="mt-4">
-                <label class="flex items-center space-x-2">
-                    <input type="checkbox" name="include_sad500" class="form-checkbox" checked>
-                    <span>Include SAD500 Fee (R350)</span>
-                </label>
-                <label class="flex items-center space-x-2">
-                    <input type="checkbox" name="include_sadc" class="form-checkbox" checked>
-                    <span>Include SADC Certificate (R1000)</span>
-                </label>
-            </div>
+        <!-- Additional Fees -->
+        <div class="space-y-4 mt-6">
+            <h3 class="text-lg font-semibold">Additional Fees</h3>
+            <label class="flex items-center space-x-2">
+                <input type="checkbox" name="include_sad500" class="form-checkbox" checked>
+                <span>Include SAD500 Fee (R350)</span>
+            </label>
+            <label class="flex items-center space-x-2">
+                <input type="checkbox" name="include_sadc" class="form-checkbox" checked>
+                <span>Include SADC Certificate (R1000)</span>
+            </label>
+        </div>
 
-            <!-- Return Load Discount -->
-            <div class="mt-4">
-                <label class="flex items-center space-x-2">
-                    <input type="checkbox" name="return_load" class="form-checkbox">
-                    <span>Apply Return Load Discount</span>
-                </label>
-            </div>
+        <!-- Return Load Discount -->
+        <div class="mt-4">
+            <label class="flex items-center space-x-2">
+                <input type="checkbox" name="return_load" class="form-checkbox">
+                <span>Apply Return Load Discount</span>
+            </label>
+        </div>
 
-            <!-- Submit Button -->
-            <button type="submit" class="w-full bg-blue-600 text-white p-2 rounded-lg mt-4">Get Quote</button>
-        </form>
+        <!-- Submit Button -->
+        <button type="submit" class="w-full bg-blue-600 text-white p-2 rounded-lg mt-6">Get Quote</button>
+    </form>
 
-        <script>
-            document.addEventListener('DOMContentLoaded', function() {
-                const weightInput = document.getElementById('weightInput');
-                const volumeInput = document.getElementById('volumeInput');
-                const shippingMethods = document.querySelectorAll('input[name="shipping_method"]');
+    <script>
+        document.addEventListener('DOMContentLoaded', function() {
+            const weightInput = document.getElementById('weightInput');
+            const volumeInput = document.getElementById('volumeInput');
+            const shippingMethods = document.querySelectorAll('input[name="shipping_method"]');
 
-                shippingMethods.forEach(method => {
-                    method.addEventListener('change', function() {
-                        if (this.value === 'weight') {
-                            weightInput.classList.remove('hidden');
-                            volumeInput.classList.add('hidden');
-                        } else {
-                            weightInput.classList.add('hidden');
-                            volumeInput.classList.remove('hidden');
-                        }
-                    });
+            shippingMethods.forEach(method => {
+                method.addEventListener('change', function() {
+                    if (this.value === 'weight') {
+                        weightInput.classList.remove('hidden');
+                        volumeInput.classList.add('hidden');
+                    } else {
+                        weightInput.classList.add('hidden');
+                        volumeInput.classList.remove('hidden');
+                    }
                 });
             });
-        </script>
-    <?php
+        });
+    </script>
+<?php
 }

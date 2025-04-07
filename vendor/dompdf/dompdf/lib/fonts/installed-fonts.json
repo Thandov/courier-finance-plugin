@@ -1,0 +1,9 @@
+{
+    "inter": {
+        "300": "\/Applications\/MAMP\/htdocs\/In-progress\/08600\/wp-content\/plugins\/courier-finance-plugin\/vendor\/dompdf\/dompdf\/lib\/fonts\/inter_300_e4c9b64172e62d24ee5f222199ce2d2c",
+        "normal": "\/Applications\/MAMP\/htdocs\/In-progress\/08600\/wp-content\/plugins\/courier-finance-plugin\/vendor\/dompdf\/dompdf\/lib\/fonts\/inter_normal_4f95092608a03c140dccd33606c19f31",
+        "500": "\/Applications\/MAMP\/htdocs\/In-progress\/08600\/wp-content\/plugins\/courier-finance-plugin\/vendor\/dompdf\/dompdf\/lib\/fonts\/inter_500_3f435dc727a887d3a9c0ddd0afecf691",
+        "600": "\/Applications\/MAMP\/htdocs\/In-progress\/08600\/wp-content\/plugins\/courier-finance-plugin\/vendor\/dompdf\/dompdf\/lib\/fonts\/inter_600_9bfe13c942a9c8fb0ff92d25ab822ed4",
+        "bold": "inter_bold_8e796d6a87340143ae66c4104836364f"
+    }
+}
