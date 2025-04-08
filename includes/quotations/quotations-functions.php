@@ -128,7 +128,7 @@ function kit_add_quotation()
     }
 
     //xxxxxxxxxx
-    $wpdb->insert($table_quotations, $data, ['%s', '%s', '%s', '%s', '%s', '%f', '%f', '%s', '%s', '%f', '%f', '%f', '%f', '%f', '%f', '%f', '%s']);
+    $wpdb->insert($table_quotations, $data, ['%s', '%s', '%s', '%s', '%s', '%s', '%s', '%s', '%s', '%s', '%s', '%s', '%d', '%d', '%d', '%d', '%s']);
     $last_inserted_id = $wpdb->insert_id;
     wp_redirect(admin_url('admin.php?page=kit-quotation-edit&quotation_id=' . $last_inserted_id . '&message=success'));
     exit;

@@ -319,7 +319,6 @@ function quotation_insert_page()
             'status' => sanitize_text_field($_POST['status']),
         );
 
-
         // Insert the quotation into the database 
         $result = kit_add_quotation($quotation_data);
         if ($result) {
@@ -360,7 +359,12 @@ function quotation_view_page()
         echo '<div class="error"><p>Quotation not found.</p></div>';
         return;
     }
-
+        $pin_path = plugin_dir_url(__FILE__) . 'icons/pin.svg';
+        echo "Debug: SVG Path is: " . esc_url($pin_path);
+        echo '<pre>';
+    print_r($quotation);
+    echo '</pre>';
+    
     // Calculate totals from stored values
     $subtotal = $quotation->sub_total;
     $final_cost = $quotation->final_cost;
