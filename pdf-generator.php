@@ -67,39 +67,15 @@ ob_start();
 <html style="margin:0">
 
 <head>
+    <link rel="stylesheet" href="/assets/css/quotation.css">
     <style>
-        /* Variable Font (covers all weights dynamically) */
-        @font-face {
-            font-family: 'Inter';
-            src: url('Inter/Inter-VariableFont_opsz,wght.ttf') format('truetype');
-            font-weight: 100 900;
-            font-style: normal;
-        }
-
-        /* Italic Variable Font (if needed) */
-        @font-face {
-            font-family: 'Inter';
-            src: url('Inter/Inter-Italic-VariableFont_opsz,wght.ttf') format('truetype');
-            font-weight: 100 900;
-            font-style: italic;
-        }
-
-        /* Static Fallbacks (only critical weights) */
-        @font-face {
-            font-family: 'Inter';
-            src: url('Inter/static/Inter_18pt-Regular.ttf') format('truetype');
-            font-weight: 400;
-        }
-
-        @font-face {
-            font-family: 'Inter';
-            src: url('Inter/static/Inter_18pt-Bold.ttf') format('truetype');
-            font-weight: 700;
-        }
-
         /* Apply font to your document */
-        body {
+        * {
             font-family: 'Inter', sans-serif;
+        }
+
+        p {
+            font-family: 'Inter-medium', sans-serif;
         }
 
         .page {
@@ -265,6 +241,7 @@ ob_start();
         td {
             padding: 5px;
             text-align: left;
+            vertical-align: top;
         }
 
         table.foottable,
@@ -304,7 +281,8 @@ ob_start();
         }
 
         .font-semibold {
-            font-weight: 600;
+            font-weight: 700;
+            font-family: 'Inter', sans-serif;
         }
 
         .mb-4 {
@@ -366,12 +344,10 @@ ob_start();
         }
 
         .font-medium {
-            font-weight: 500;
+            font-family: 'Inter-medium', sans-serif;
+
         }
 
-        .font-semibold {
-            font-weight: 600;
-        }
 
         .space-y-2> :not([hidden])~ :not([hidden]) {
             --tw-space-y-reverse: 0;
@@ -442,11 +418,13 @@ ob_start();
             <table>
                 <tr>
                     <td>
-                        <img style="width: 150px" src="<?php echo plugin_dir_url(__FILE__) . 'img/logo-white.png'; ?>" alt="Logo">
+                        <img style="width: 150px" src="<?php echo plugin_dir_url(__FILE__) . 'img/logo-white.png'; ?>"
+                            alt="Logo">
                     </td>
                     <td style="text-align: right">
                         <h1 class="text-white">Quotation <?php echo $quotation->id; ?></h1>
-                        <p class="text-white">Date: <?php echo date('F j, Y', strtotime($quotation->date_created)); ?></p>
+                        <p class="text-white">Date: <?php echo date('F j, Y', strtotime($quotation->date_created)); ?>
+                        </p>
                     </td>
                 </tr>
             </table>
@@ -456,34 +434,38 @@ ob_start();
         <table>
             <tr>
                 <td width="50%" class="space-y-2">
+                <h3 class="text-lg font-semibold text-gray-700" style="text-align: left; margin: 0">Bill From:</h3>
                     <!-- Information from Sender -->
                     <table>
                         <tr>
-                            <td valign="top">
+                            <td style="width: 50px">
                                 <p class="font-bold w-[80px]">Address:</p>
                             </td>
                             <td>
-                                <p class="font-medium text-gray-600"><?php echo esc_html(get_option('company_address', 'No address set'));  ?></p>
+                                <p class="font-medium text-gray-600">
+                                <?php echo ($quotation->sender_address) ?? "Error";  ?></p>
                             </td>
                         </tr>
                         <tr>
-                            <td valign="top">
+                            <td style="width: 50px">
                                 <p class="font-bold w-[80px]">Tel:</p>
                             </td>
                             <td>
-                                <p class="font-medium text-gray-600"><?php echo ($quotation->customer_phone) ?? "Error";  ?></p>
+                                <p class="font-medium text-gray-600">
+                                    <?php echo ($quotation->customer_phone) ?? "Error";  ?></p>
                             </td>
                         </tr>
                         <tr>
-                            <td valign="top">
+                            <td style="width: 50px">
                                 <p class="font-bold w-[80px]">Email:</p>
                             </td>
                             <td>
-                                <p class="font-medium text-gray-600"><?php echo ($quotation->customer_email) ?? "Error";  ?></p>
+                                <p class="font-medium text-gray-600">
+                                    <?php echo ($quotation->customer_email) ?? "Error";  ?></p>
                             </td>
                         </tr>
                         <tr>
-                            <td valign="top">
+                            <td style="width: 50px">
                                 <p class="font-bold w-[80px]">VAT:</p>
                             </td>
                             <td>
@@ -501,25 +483,29 @@ ob_start();
                             <tr>
                                 <td style="text-align:right">
                                     <p class="font-bold w-[80px]" style="display: inline;">Delivery Address:</p>
-                                    <p class="font-medium text-gray-600" style="display: inline;"><?php echo ($quotation->delivery_address) ?? "Error";  ?></p>
+                                    <p class="font-medium text-gray-600" style="display: inline;">
+                                        <?php echo ($quotation->delivery_address) ?? "Error";  ?></p>
                                 </td>
                             </tr>
                             <tr>
                                 <td style="text-align:right">
                                     <p class="font-bold w-[80px]" style="display: inline;">Tel:</p>
-                                    <p class="font-medium text-gray-600" style="display: inline;"><?php echo ($quotation->receiver_phone) ?? "Error";  ?></p>
+                                    <p class="font-medium text-gray-600" style="display: inline;">
+                                        <?php echo ($quotation->receiver_phone) ?? "Error";  ?></p>
                                 </td>
                             </tr>
                             <tr>
                                 <td style="text-align:right;">
                                     <p class="font-bold w-[80px]" style="display: inline;">Email:</p>
-                                    <p class="font-medium text-gray-600" style="display: inline;"><?php echo ($quotation->receiver_email) ?? "Error";  ?></p>
+                                    <p class="font-medium text-gray-600" style="display: inline;">
+                                        <?php echo ($quotation->receiver_email) ?? "Error";  ?></p>
                                 </td>
                             </tr>
                             <tr>
                                 <td style="text-align:right;">
                                     <p class="font-bold w-[80px]" style="display: inline;">Receiver Name:</p>
-                                    <p class="font-medium text-gray-600" style="display: inline;"><?php echo ($quotation->receiver_name) ?? "Error";  ?></p>
+                                    <p class="font-medium text-gray-600" style="display: inline;">
+                                        <?php echo ($quotation->receiver_name) ?? "Error";  ?></p>
                                 </td>
                             </tr>
                         </table>
@@ -548,37 +534,40 @@ ob_start();
                     </td>
                 </tr>
                 <?php if ($quotation->include_sad500) : ?>
-                    <tr>
-                        <td>
-                            <p>SAD500 Fee</p>
-                        </td>
-                        <td style="text-align: right;">
-                            <p>R 350.00</p>
-                        </td>
-                    </tr>
+                <tr>
+                    <td>
+                        <p>SAD500 Fee</p>
+                    </td>
+                    <td style="text-align: right;">
+                        <p>R 350.00</p>
+                    </td>
+                </tr>
                 <?php endif; ?>
                 <?php if ($quotation->include_sadc) : ?>
-                    <tr>
-                        <td>
-                            <p>SADC Certificate</p>
-                        </td>
-                        <td style="text-align: right;">
-                            <p>R 1000.00</p>
-                        </td>
-                    </tr>
+                <tr>
+                    <td>
+                        <p>SADC Certificate</p>
+                    </td>
+                    <td style="text-align: right;">
+                        <p>R 1000.00</p>
+                    </td>
+                </tr>
                 <?php endif; ?>
                 <?php if ($quotation->return_load) : ?>
-                    <tr class="bg-blue-50 text-blue-600">
-                        <td>
-                            <p>Return Load Discount (10%)</p>
-                        </td>
-                        <td style="text-align: right;">
-                            <p>- R <?php echo number_format($quotation->sub_total * 0.1, 2); ?></p>
-                        </td>
-                    </tr>
+                <tr class="bg-blue-50 text-blue-600">
+                    <td>
+                        <p>Return Load Discount (10%)</p>
+                    </td>
+                    <td style="text-align: right;">
+                        <p>- R <?php echo number_format($quotation->sub_total * 0.1, 2); ?></p>
+                    </td>
+                </tr>
                 <?php endif; ?>
+            </table>
+            <table>
                 <tr class="total">
-                    <td style="text-align: right; border: 0px">
+                    <td></td>
+                    <td style="text-align: right; border: 0px; width: 65%">
                         <p class="text-xl text-blue-600">Total Amount</p>
                     </td>
                     <td style="text-align: right; border: 0px">
@@ -592,28 +581,26 @@ ob_start();
         <div class="max-w-2xl mx-auto" style="background: #F9FAFB; padding: 5px 25px; border-radius: 15px;">
             <table>
                 <tr>
-                    <td style="width: 50%">
+                    <td style="width: 50%" valign="top">
                         <div class="text-sm text-gray-600">
                             <p class="font-medium mb-2">Payment Details:</p>
-                            <p>Bank: <?php echo ($payment_details->bank_name) ?? ""; ?></p>
+                            <p class="font-medium">Bank: <?php echo ($payment_details->bank_name) ?? ""; ?></p>
                             <p>Account: <?php echo ($payment_details->account) ?? ""; ?></p>
                             <p>Branch: <?php echo ($payment_details->branch) ?? ""; ?></p>
                         </div>
-
                     </td>
                     <td>
                         <div class="text-gray-600">
-                            <div class="diccc">
-                                <?php echo esc_html(get_option('company_name', 'No address set'));  ?>
-                            </div>
                             <div class="font-medium">
                                 <table class="foottable">
                                     <tr>
-                                        <td width="20px">
+                                        <td style="vertical-align: top; width: 20px">
                                             <img class="iconning" src="<?php echo $pin; ?>" alt="pin">
                                         </td>
                                         <td>
-                                            <p class="font-medium" style="display: inline-block; margin: 0"> <?php echo esc_html(get_option('company_address', 'No address set'));  ?></p>
+                                            <p class="font-medium" style="display: inline-block; margin: 0">
+                                                <?php echo esc_html(get_option('company_address', 'No address set'));  ?>
+                                            </p>
                                         </td>
                                     </tr>
                                 </table>
@@ -621,11 +608,12 @@ ob_start();
                             <div class="font-medium">
                                 <table class="foottable">
                                     <tr>
-                                        <td width="20px">
+                                        <td style="vertical-align: top; width: 20px">
                                             <img class="iconning" src="<?php echo $contact; ?>" alt="web">
                                         </td>
                                         <td>
-                                            <p class="font-medium" style="display: inline-block; margin: 0"> <?php echo esc_html(get_option('contact_1', 'No address set'));  ?></p>
+                                            <p class="font-medium" style="display: inline-block; margin: 0">
+                                                <?php echo esc_html(get_option('contact_1', 'No address set'));  ?></p>
                                         </td>
                                     </tr>
                                 </table>
@@ -633,11 +621,13 @@ ob_start();
                             <div class="font-medium">
                                 <table class="foottable">
                                     <tr>
-                                        <td width="20px">
+                                        <td style="vertical-align: top; width: 20px">
                                             <img class="iconning" src="<?php echo $email; ?>" alt="email">
                                         </td>
                                         <td>
-                                            <p class="font-medium" style="display: inline-block; margin: 0"> <?php echo esc_html(get_option('email_address', 'No address set'));  ?></p>
+                                            <p class="font-medium" style="display: inline-block; margin: 0">
+                                                <?php echo esc_html(get_option('email_address', 'No address set'));  ?>
+                                            </p>
                                         </td>
                                     </tr>
                                 </table>

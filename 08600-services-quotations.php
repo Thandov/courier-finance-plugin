@@ -13,7 +13,7 @@
 if (! defined('ABSPATH')) {
     exit;
 }
-
+define('COURIER_FINANCE_PLUGIN_PATH', plugin_dir_path(__FILE__));
 // Enqueue styles for the admin panel
 function customStyling()
 {
@@ -33,8 +33,12 @@ register_deactivation_hook(__FILE__, array('Database', 'deactivate'));
 Plugin::init();
 
 // Include the service functions
+include_once plugin_dir_path(__FILE__) . 'includes/admin-menu.php';
+include_once plugin_dir_path(__FILE__) . 'includes/admin-pages.php';
 include_once(plugin_dir_path(__FILE__) . 'includes/services/services-functions.php');
 include_once(plugin_dir_path(__FILE__) . 'includes/quotations/quotations-functions.php');
+require_once plugin_dir_path(__FILE__) . 'includes/waybill/waybill-functions.php';
+require_once plugin_dir_path(__FILE__) . 'includes/customers/customers-functions.php';
 
 function my_plugin_enqueue_scripts()
 {
@@ -46,71 +50,7 @@ function my_plugin_enqueue_scripts()
 }
 add_action('admin_enqueue_scripts', 'my_plugin_enqueue_scripts');
 
-/**
- * Register the plugin menu and submenu
- */
-function plugin_add_menu()
-{
-    // Add main menu
-    add_menu_page(
-        '08600 Services & Quotations', // Page title
-        '08600 Services', // Menu title
-        'manage_options', // Capability
-        '08600-services-quotations', // Menu slug
-        'plugin_main_page', // Callback function
-        'dashicons-businessperson', // Icon
-        6 // Position
-    );
 
-    // Add submenu for services
-    add_submenu_page(
-        '08600-services-quotations', // Parent slug
-        'All Services', // Page title
-        'All Services', // Menu title
-        'manage_options', // Capability
-        '08600-services-list', // Submenu slug
-        'plugin_services_list_page' // Callback function
-    );
-
-    // Add main menu
-    add_menu_page(
-        'Quotations', // Page title
-        'Quotations', // Menu title
-        'manage_options', // Capability
-        'Quotations', // Menu slug
-        'quotation_page', // Callback function
-        'dashicons-businessperson', // Icon
-        6 // Position
-    );
-    // Add submenu for services
-    add_submenu_page(
-        'Quotations', // Parent slug
-        'All Quotations', // Page title
-        'All Quotations', // Menu title
-        'manage_options', // Capability
-        '08600-quotations-list', // Submenu slug
-        'plugin_quotations_list_page' // Callback function
-    );
-    // Add submenu for services
-    add_submenu_page(
-        'Quotations', // Parent slug
-        'Create Quotations', // Page title
-        'Create Quotations', // Menu title
-        'manage_options', // Capability
-        '08600-quotations-insert', // Submenu slug
-        'quotation_insert_page' // Callback function
-    );
-    // Add submenu for services
-    add_submenu_page(
-        'Quotations',       // Parent slug (e.g., under Pages)
-        'View Quotation',                // Page title
-        '',                // Menu title
-        'manage_options',                // Capability
-        'kit-quotation-edit',         // Menu slug
-        'quotation_view_page'            // Callback function to display the page
-    );
-}
-add_action('admin_menu', 'plugin_add_menu');
 
 /**
  * Main plugin page callback with form to insert new service
@@ -138,56 +78,56 @@ function plugin_main_page()
     }
 
     // Form for adding new service
-?>
-    <table>
-        <tr>
-            <td>
-                <form method="POST" action="">
-                    <table class="form-table">
-                        <tr>
-                            <td style="padding: 0; margin: 0"><label for="service_name">Service Name</label><br>
-                                <input type="text" name="service_name" id="service_name" required />
-                            </td>
-                        </tr>
-                        <tr>
-                            <td style="padding: 0; margin: 0"><label for="service_description">Description</label><br>
-                                <textarea name="service_description" id="service_description" required></textarea>
-                            </td>
-                        </tr>
-                        <tr>
-                            <td style="padding: 0; margin: 0"><label for="service_image">Flat Icon</label><br>
-                                <input type="text" name="service_image" id="service_image" />
-                            </td>
-                        </tr>
-                        <tr>
-                            <td colspan="2"><input type="submit" name="submit_service" value="Add Service"
-                                    class="button-primary" /></td>
-                        </tr>
-                    </table>
-                </form>
-            </td>
-            <td style="padding-left: 20px" valign="top">
-                <?php
-                // Get all services from the database
-                global $wpdb;
-                $services_table_name = $wpdb->prefix . 'kit_services';
+    ?>
+        <table>
+            <tr>
+                <td>
+                    <form method="POST" action="">
+                        <table class="form-table">
+                            <tr>
+                                <td style="padding: 0; margin: 0"><label for="service_name">Service Name</label><br>
+                                    <input type="text" name="service_name" id="service_name" required />
+                                </td>
+                            </tr>
+                            <tr>
+                                <td style="padding: 0; margin: 0"><label for="service_description">Description</label><br>
+                                    <textarea name="service_description" id="service_description" required></textarea>
+                                </td>
+                            </tr>
+                            <tr>
+                                <td style="padding: 0; margin: 0"><label for="service_image">Flat Icon</label><br>
+                                    <input type="text" name="service_image" id="service_image" />
+                                </td>
+                            </tr>
+                            <tr>
+                                <td colspan="2"><input type="submit" name="submit_service" value="Add Service"
+                                        class="button-primary" /></td>
+                            </tr>
+                        </table>
+                    </form>
+                </td>
+                <td style="padding-left: 20px" valign="top">
+                    <?php
+                    // Get all services from the database
+                    global $wpdb;
+                    $services_table_name = $wpdb->prefix . 'kit_services';
 
-                // Query to retrieve services from the database
-                $services = $wpdb->get_results("SELECT * FROM $services_table_name");
+                    // Query to retrieve services from the database
+                    $services = $wpdb->get_results("SELECT * FROM $services_table_name");
 
-                // If no services are found, display a message
-                if (empty($services)) {
-                    echo '<p>No services found.</p>';
-                } else {
-                    plugin_services_list_page();
-                }
-                ?>
-            </td>
-        </tr>
-    </table>
+                    // If no services are found, display a message
+                    if (empty($services)) {
+                        echo '<p>No services found.</p>';
+                    } else {
+                        plugin_services_list_page();
+                    }
+                    ?>
+                </td>
+            </tr>
+        </table>
 
 
-<?php
+    <?php
     // Output the buffered content
     echo ob_get_clean();
 }
@@ -286,11 +226,8 @@ add_action('admin_post_delete_service', 'handle_service_deletion');
  * Services list page callback
  */
 function plugin_quotations_list_page()
-{ ?>
-    <div class="bg-red-100">
-        <?php echo kit_get_all_quotations_table(); ?>
-    </div>
-<?php
+{  
+    kit_get_all_quotations_table();
 }
 
 // Function to display the form and handle the form submission
@@ -359,11 +296,7 @@ function quotation_view_page()
         echo '<div class="error"><p>Quotation not found.</p></div>';
         return;
     }
-        $pin_path = plugin_dir_url(__FILE__) . 'icons/pin.svg';
-        echo "Debug: SVG Path is: " . esc_url($pin_path);
-        echo '<pre>';
-    print_r($quotation);
-    echo '</pre>';
+
     
     // Calculate totals from stored values
     $subtotal = $quotation->sub_total;
@@ -498,15 +431,16 @@ function quotation_view_page()
                     <p>VAT included where applicable</p>
                 </div>
             </div>
-        </div>
-
-        <!-- Action Buttons -->
+            <!-- Action Buttons -->
         <div class="mt-8 text-right">
             <a href="<?php echo plugins_url('pdf-generator.php', __FILE__); ?>?quotation_id=<?php echo $quotation_id; ?>"
                 class="bg-blue-600 text-white px-4 py-2 rounded">
                 Download PDF
             </a>
         </div>
+        </div>
+
+        
     </div>
 
     <?php
@@ -558,7 +492,7 @@ function quote_instructions()
 <?php
 }
 // ✅ Reusable Quotation Form
-function quotation_form($quotation = null, $type)
+function quotation_form($type, $quotation = null)
 {
     $action = ($type === 'edit') ? 'kit_update_quotation' : 'kit_add_quotation';
     $submit_text = ($type === 'edit') ? 'Update quotation' : 'Add quotation';
@@ -730,3 +664,5 @@ function quotation_form($quotation = null, $type)
     </script>
 <?php
 }
+
+
