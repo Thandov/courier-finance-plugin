@@ -2956,8 +2956,16 @@ class KIT_Commons
 
                 // Event delegation for remove buttons
                 document.addEventListener('click', (e) => {
-                    if (e.target.closest('.remove-item')) {
-                        const itemRow = e.target.closest('.dynamic-item');
+                    const removeButton = e.target.closest('.remove-item');
+                    if (removeButton) {
+                        e.preventDefault();
+                        e.stopPropagation();
+
+                        const itemRow = removeButton.closest('tr.dynamic-item');
+                        if (!itemRow) {
+                            return;
+                        }
+
                         // Also remove the invoice row if it exists (next sibling)
                         const invoiceRow = itemRow.nextElementSibling;
                         if (invoiceRow && invoiceRow.classList.contains('dynamic-item-invoice')) {
