@@ -130,7 +130,7 @@ if (!empty($waybill['truck_driver']) && is_numeric($waybill['truck_driver'])) {
 </style>
 
 <div class="max-w-6xl mx-auto p-6 bg-white rounded-lg shadow-md">
-    <form method="POST" action="<?php echo esc_url(admin_url('admin-post.php')) ?>">
+    <form method="POST" action="<?php echo esc_url(admin_url('admin-post.php')) ?>" id="edit-waybill-form">
         <input type="hidden" name="action" value="update_waybill_action">
         <input type="hidden" name="waybill_id" value="<?php echo esc_attr($waybill_id) ?>">
         <input type="hidden" name="waybill_no" value="<?php echo esc_attr($waybill['waybill_no']) ?>">
@@ -637,6 +637,9 @@ if (!empty($waybill['truck_driver']) && is_numeric($waybill['truck_driver'])) {
                 $misc_total = 0;
             }
             ?>
+            
+            <!-- ✅ Hidden flag: misc section was rendered (for UPDATE mode logic) -->
+            <input type="hidden" name="misc_section_rendered" value="1">
 
             <?php echo KIT_Commons::dynamicItemsControl([
                 'container_id'    => 'misc-items',
@@ -657,6 +660,49 @@ if (!empty($waybill['truck_driver']) && is_numeric($waybill['truck_driver'])) {
             ?>
             <?php echo KIT_Commons::renderButton('Save Changes', 'primary', 'lg', ['type' => 'submit']); ?>
         </div>
+        
+        <!-- ✅ CLEANUP SCRIPT: Remove empty misc/waybill items before form submission -->
+        <script>
+            document.addEventListener('DOMContentLoaded', function() {
+                const form = document.getElementById('edit-waybill-form');
+                if (!form) return;
+                
+                form.addEventListener('submit', function(e) {
+                    // Clean up empty misc items
+                    const miscContainer = document.getElementById('misc-items');
+                    if (miscContainer) {
+                        const miscRows = miscContainer.querySelectorAll('input[name*="[misc_item]"]');
+                        miscRows.forEach(input => {
+                            const row = input.closest('tr.dynamic-item');
+                            if (row && !input.value.trim()) {
+                                // Item name is empty = deleted row, remove it
+                                const invoiceRow = row.nextElementSibling;
+                                if (invoiceRow && invoiceRow.classList.contains('dynamic-item-invoice')) {
+                                    invoiceRow.remove();
+                                }
+                                row.remove();
+                            }
+                        });
+                    }
+                    
+                    // Also clean up custom waybill items
+                    const customItemsContainer = document.getElementById('custom-waybill-items');
+                    if (customItemsContainer) {
+                        const customRows = customItemsContainer.querySelectorAll('input[name*="[item_name]"]');
+                        customRows.forEach(input => {
+                            const row = input.closest('tr.dynamic-item');
+                            if (row && !input.value.trim()) {
+                                const invoiceRow = row.nextElementSibling;
+                                if (invoiceRow && invoiceRow.classList.contains('dynamic-item-invoice')) {
+                                    invoiceRow.remove();
+                                }
+                                row.remove();
+                            }
+                        });
+                    }
+                });
+            });
+        </script>
     </form>
 </div>
 <!-- End main container -->

@@ -1365,16 +1365,40 @@ class KIT_Waybills
         $maybe_items_list = is_array($miscData) ? array_values($miscData) : [];
         if (isset($maybe_items_list[0]) && is_array($maybe_items_list[0]) && isset($maybe_items_list[0]['misc_item'])) {
             // Transform from dynamicItemsControl format to getMiscCharges format
+            // ✅ FIX: Strictly filter out empty items to prevent false data after deletions
             foreach ($maybe_items_list as $item) {
-                if (!empty($item['misc_item'])) {
-                    $transformed_data['misc_item'][] = $item['misc_item'];
-                    $transformed_data['misc_price'][] = floatval($item['misc_price'] ?? 0);
-                    $transformed_data['misc_quantity'][] = intval($item['misc_quantity'] ?? 1);
+                $misc_item = sanitize_text_field($item['misc_item'] ?? '');
+                $misc_price = floatval($item['misc_price'] ?? 0);
+                $misc_quantity = intval($item['misc_quantity'] ?? 1);
+                
+                // Only add item if it has a name/description (empty names indicate deleted/blank rows)
+                if (!empty($misc_item) && ($misc_price > 0 || $misc_quantity > 0)) {
+                    $transformed_data['misc_item'][] = $misc_item;
+                    $transformed_data['misc_price'][] = $misc_price;
+                    $transformed_data['misc_quantity'][] = $misc_quantity;
                 }
             }
         } else {
-            // Data is already in getMiscCharges format
+            // Data is already in getMiscCharges format - still filter empty items
             $transformed_data = $miscData;
+            if (isset($transformed_data['misc_item']) && is_array($transformed_data['misc_item'])) {
+                $filtered_items = [];
+                $filtered_prices = [];
+                $filtered_quantities = [];
+                
+                for ($i = 0; $i < count($transformed_data['misc_item']); $i++) {
+                    $item_name = sanitize_text_field($transformed_data['misc_item'][$i] ?? '');
+                    if (!empty($item_name)) {
+                        $filtered_items[] = $item_name;
+                        $filtered_prices[] = floatval($transformed_data['misc_price'][$i] ?? 0);
+                        $filtered_quantities[] = intval($transformed_data['misc_quantity'][$i] ?? 1);
+                    }
+                }
+                
+                $transformed_data['misc_item'] = $filtered_items;
+                $transformed_data['misc_price'] = $filtered_prices;
+                $transformed_data['misc_quantity'] = $filtered_quantities;
+            }
         }
 
         // Use getMiscCharges function with transformed data
@@ -2028,28 +2052,23 @@ class KIT_Waybills
         // ============================================
         $final_misc_data = self::prepareMiscCharges($data);
         
-        // UPDATE MODE: Preserve original misc data if VAT unchanged
+        // UPDATE MODE: Preserve waybill_description only (not misc items - allow deletions)
         if ($is_update_mode) {
+            $original_misc = maybe_unserialize($existing->waybill['miscellaneous'] ?? '');
+            // ✅ IMPORTANT: Do NOT preserve misc_items or misc_total in UPDATE mode
+            // When user edits and deletes all items, we must respect that deletion
+            // Only preserve waybill_description if it wasn't changed
+            if (is_array($original_misc) && isset($original_misc['others']['waybill_description'])) {
+                if (!isset($data['waybill_description']) || empty($data['waybill_description'])) {
+                    $final_misc_data['others']['waybill_description'] = $original_misc['others']['waybill_description'];
+                }
+            }
+            // Also preserve international price snapshot when editing if VAT not changed
             $original_vat = $existing->waybill['vat_include'] ?? 0;
             $new_vat = isset($data['vat_include']) ? 1 : 0;
-            $vat_changed = ($original_vat != $new_vat);
-            
-            if (!$vat_changed) {
-                $original_misc = maybe_unserialize($existing->waybill['miscellaneous'] ?? '');
-                $misc_was_posted = isset($data['misc']);
-                if (!$misc_was_posted && is_array($original_misc)) {
-                    $final_misc_data['misc_items'] = $original_misc['misc_items'] ?? [];
-                    $final_misc_data['misc_total'] = isset($original_misc['misc_total']) ? floatval($original_misc['misc_total']) : 0;
-                }
-                if (empty($new_vat) && is_array($original_misc) && isset($original_misc['others']['international_price_rands'])) {
-                    $final_misc_data['others']['international_price_rands'] = $original_misc['others']['international_price_rands'];
-                    $final_misc_data['others']['usd_to_zar_rate_used'] = $original_misc['others']['usd_to_zar_rate_used'] ?? null;
-                }
-                if (is_array($original_misc) && isset($original_misc['others']['waybill_description'])) {
-                    if (!isset($data['waybill_description']) || empty($data['waybill_description'])) {
-                        $final_misc_data['others']['waybill_description'] = $original_misc['others']['waybill_description'];
-                    }
-                }
+            if ($original_vat == $new_vat && is_array($original_misc) && isset($original_misc['others']['international_price_rands'])) {
+                $final_misc_data['others']['international_price_rands'] = $original_misc['others']['international_price_rands'];
+                $final_misc_data['others']['usd_to_zar_rate_used'] = $original_misc['others']['usd_to_zar_rate_used'] ?? null;
             }
         }
 

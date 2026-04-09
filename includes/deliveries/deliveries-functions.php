@@ -637,6 +637,32 @@ class KIT_Deliveries
     {
         global $wpdb;
         $table_name = $wpdb->prefix . 'kit_deliveries';
+        $drivers_table = $wpdb->prefix . 'kit_drivers';
+
+        $drivers_table_exists = $wpdb->get_var("SHOW TABLES LIKE '$drivers_table'");
+        $driver_id_exists = false;
+        if ($drivers_table_exists) {
+            $driver_id_exists = (bool) $wpdb->get_var($wpdb->prepare(
+                "SELECT COUNT(*) FROM INFORMATION_SCHEMA.COLUMNS 
+                WHERE TABLE_SCHEMA = %s AND TABLE_NAME = %s AND COLUMN_NAME = 'driver_id'",
+                DB_NAME,
+                $table_name
+            ));
+        }
+
+        $driver_select = '';
+        $driver_join = '';
+        if ($drivers_table_exists && $driver_id_exists) {
+            $driver_select = ",
+                    $table_name.driver_id,
+                    dr.name AS driver_name,
+                    dr.phone AS driver_phone,
+                    dr.email AS driver_email,
+                    dr.license_number AS driver_license";
+            $driver_join = "
+                LEFT JOIN {$drivers_table} dr
+                    ON $table_name.driver_id = dr.id";
+        }
 
         $query = "
                 SELECT 
@@ -646,7 +672,6 @@ class KIT_Deliveries
                     $table_name.destination_city_id,
                     $table_name.dispatch_date, 
                     $table_name.truck_number, 
-                    $table_name.driver_id,
                     $table_name.status, 
                     sd.description,
                     sd.destination_country_id,
@@ -654,11 +679,8 @@ class KIT_Deliveries
                     oc1.country_name AS origin_country, 
                     oc1.country_code AS origin_code,
                     oc2.country_name AS destination_country, 
-                    oc2.country_code AS destination_code,
-                    d.name AS driver_name,
-                    d.phone AS driver_phone,
-                    d.email AS driver_email,
-                    d.license_number AS driver_license
+                    oc2.country_code AS destination_code
+                    $driver_select
 
                 FROM $table_name 
 
@@ -670,9 +692,7 @@ class KIT_Deliveries
 
                 LEFT JOIN {$wpdb->prefix}kit_operating_countries oc2 
                     ON sd.destination_country_id = oc2.id 
-
-                LEFT JOIN {$wpdb->prefix}kit_drivers d
-                    ON $table_name.driver_id = d.id
+                $driver_join
                 WHERE $table_name.delivery_reference != 'pending'
                 AND oc2.is_active = 1";
 
@@ -698,7 +718,14 @@ class KIT_Deliveries
         }
 
         $query .= " ORDER BY dispatch_date ASC";
-        return $wpdb->get_results($query);
+        $deliveries = $wpdb->get_results($query);
+
+        if ($deliveries === null) {
+            error_log('filterDeliveries SQL error: ' . $wpdb->last_error);
+            return [];
+        }
+
+        return $deliveries;
     }
 
     /**
@@ -723,6 +750,9 @@ class KIT_Deliveries
 
         // Get filtered deliveries
         $deliveries = self::filterDeliveries($filter_type, $country_code);
+        if (!is_array($deliveries)) {
+            $deliveries = [];
+        }
 
         // Render delivery cards HTML
         ob_start();
