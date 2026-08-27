@@ -8,6 +8,9 @@ require_once plugin_dir_path(__FILE__) . '../user-roles.php';
 
 // Include unified table class
 require_once plugin_dir_path(__FILE__) . '../class-unified-table.php';
+if (!class_exists('KIT_QuickStats')) {
+    require_once plugin_dir_path(__FILE__) . '../components/quickStats.php';
+}
 
 // Handle country management actions
 if (isset($_POST['add_country']) && check_admin_referer('add_country_action', 'add_country_nonce')) {
@@ -126,6 +129,60 @@ if (isset($_POST['bulk_action']) && isset($_POST['country_ids']) && is_array($_P
     }
 }
 
+// Unified table bulk (same POST fields as Waybill Manage)
+if (
+    isset($_POST['bulk_action'], $_POST['bulk_ids'], $_POST['bulk_nonce'])
+    && wp_verify_nonce(sanitize_text_field(wp_unslash($_POST['bulk_nonce'])), 'bulk_action_nonce')
+) {
+    global $wpdb;
+    $table = $wpdb->prefix . 'kit_operating_countries';
+    $action = sanitize_text_field(wp_unslash($_POST['bulk_action']));
+    $country_ids = array_filter(array_map('intval', explode(',', sanitize_text_field(wp_unslash($_POST['bulk_ids'])))));
+    $updated_count = 0;
+
+    if (!empty($country_ids) && current_user_can('manage_options')) {
+        switch ($action) {
+            case 'update_status':
+                $status = isset($_POST['status_value']) ? intval($_POST['status_value']) : 0;
+                $placeholders = implode(',', array_fill(0, count($country_ids), '%d'));
+                $updated_count = $wpdb->query($wpdb->prepare(
+                    "UPDATE $table SET is_active = %d WHERE id IN ($placeholders)",
+                    array_merge([$status], $country_ids)
+                ));
+                break;
+
+            case 'activate':
+                $result = $wpdb->query($wpdb->prepare(
+                    "UPDATE $table SET is_active = 1 WHERE id IN (" . implode(',', array_fill(0, count($country_ids), '%d')) . ")",
+                    ...$country_ids
+                ));
+                $updated_count = $result;
+                break;
+
+            case 'deactivate':
+                $result = $wpdb->query($wpdb->prepare(
+                    "UPDATE $table SET is_active = 0 WHERE id IN (" . implode(',', array_fill(0, count($country_ids), '%d')) . ")",
+                    ...$country_ids
+                ));
+                $updated_count = $result;
+                break;
+
+            case 'delete':
+                $result = $wpdb->query($wpdb->prepare(
+                    "DELETE FROM $table WHERE id IN (" . implode(',', array_fill(0, count($country_ids), '%d')) . ")",
+                    ...$country_ids
+                ));
+                $updated_count = $result;
+                break;
+        }
+
+        if ($updated_count > 0) {
+            $action_text = $action === 'update_status' ? 'Updated' : ucfirst($action) . 'd';
+            echo '<div class="notice notice-success"><p>' . esc_html($action_text) . ' ' . intval($updated_count) . ' countr' . ($updated_count === 1 ? 'y' : 'ies') . ' successfully.</p></div>';
+        }
+    }
+}
+
 // Handle quick toggle (AJAX)
 if (isset($_POST['action']) && $_POST['action'] === 'toggle_country_status') {
     global $wpdb;
@@ -154,12 +211,6 @@ if (isset($_GET['edit_country'])) {
     $edit_country = $wpdb->get_row($wpdb->prepare("SELECT * FROM $table WHERE id = %d", $edit_id));
 }
 
-// Get statistics
-$total_countries = count($countries);
-$active_countries = count(array_filter($countries, function ($c) {
-    return $c->is_active;
-}));
-$inactive_countries = $total_countries - $active_countries;
 ?>
 
 <div class="wrap">
@@ -180,41 +231,8 @@ $inactive_countries = $total_countries - $active_countries;
         <hr class="wp-header-end">
 
         <?php
-        $countries_stats = [
-            [
-                'title' => 'Total Countries',
-                'value' => number_format($total_countries),
-                'icon' => 'M20 7l-8-4-8 4m16 0l-8 4m8-4v10l-8 4m0-10L4 7m8 4v10M4 7v10l8 4',
-                'color' => 'blue',
-                'class' => 'countries-stats-total'
-            ],
-            [
-                'title' => 'Active Countries',
-                'value' => number_format($active_countries),
-                'icon' => 'M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z',
-                'color' => 'green',
-                'class' => 'countries-stats-active'
-            ],
-            [
-                'title' => 'Inactive Countries',
-                'value' => number_format($inactive_countries),
-                'icon' => 'M13 10V3L4 14h7v7l9-11h-7z',
-                'color' => 'yellow',
-                'class' => 'countries-stats-inactive'
-            ],
-            [
-                'title' => 'Countries Served',
-                'value' => number_format($total_countries),
-                'icon' => 'M3.055 11H5a2 2 0 012 2v1a2 2 0 002 2 2 2 0 012 2v2.945M8 3.935V5.5A2.5 2.5 0 0010.5 8h.5a2 2 0 012 2 2 2 0 104 0 2 2 0 012-2h1.064M15 20.488V18a2 2 0 012-2h3.064M21 12a9 9 0 11-18 0 9 9 0 0118 0z',
-                'color' => 'purple',
-                'class' => 'countries-stats-served'
-            ]
-        ];
-
-        // Render stats
-        echo KIT_QuickStats::render($countries_stats, '', [
-            'grid_cols' => 'grid-cols-1 sm:grid-cols-4 md:grid-cols-4 lg:grid-cols-4',
-            'gap' => 'gap-4'
+        echo KIT_QuickStats::render_for_context(KIT_QuickStats::CONTEXT_COUNTRIES, [
+            'countries' => $countries,
         ]);
         ?>
 
@@ -231,7 +249,9 @@ $inactive_countries = $total_countries - $active_countries;
                         'country_code' => $country->country_code,
                         'charge_group' => $country->charge_group,
                         'is_active' => $country->is_active,
-                        'created_at' => $country->created_at
+                        'created_at' => $country->created_at,
+                        'city' => $country->country_name,
+                        'status' => !empty($country->is_active) ? 'active' : 'inactive',
                     ];
                 }
 
@@ -276,7 +296,7 @@ $inactive_countries = $total_countries - $active_countries;
                             return '
                             <div class="flex items-center gap-2">
                                 <span class="' . $status_class . ' font-semibold ' . $color_class . '">● ' . $status_text . '</span>
-                                ' . KIT_Commons::renderButton($toggle_text, 'ghost', 'sm', [
+                                ' . KIT_Commons::renderButton($toggle_text, 'ghost', 'lg', [
                                 'type' => 'button',
                                 'classes' => 'quick-toggle-btn text-xs px-2 py-1 rounded border hover:bg-gray-50 ' . $color_class,
                                 'data-country-id' => $row['id'],
@@ -313,23 +333,22 @@ $inactive_countries = $total_countries - $active_countries;
                 ];
 
                 // Render unified table
-                echo KIT_Unified_Table::infinite($countries_data, $columns, [
+                echo KIT_Unified_Table::infinite($countries_data, $columns, KIT_Unified_Table::optionsWithManageDefaults([
                     'title' => 'Operating Countries',
                     'actions' => $actions,
-                    'searchable' => true,
-                    'sortable' => true,
                     'pagination' => true,
                     'items_per_page' => 20,
                     'current_page' => 1,
                     'show_items_per_page' => true,
-                    'exportable' => true,
                     'empty_message' => 'No countries found. <a href="?page=08600-countries&add_new=1">Add your first country</a>.',
-                    'bulk_actions' => [
-                        'activate' => 'Activate',
-                        'deactivate' => 'Deactivate',
-                        'delete' => 'Delete'
-                    ]
-                ]);
+                    'search_placeholder' => 'Search countries...',
+                    'search_filters' => [
+                        ['value' => 'country_name', 'label' => 'Name', 'placeholder' => 'Search by name...'],
+                        ['value' => 'country_code', 'label' => 'Code', 'placeholder' => 'Search by code...'],
+                    ],
+                    'search_default_filter' => 'country_name',
+                    'bulk_actions_list' => ['delete', 'export', 'packing_list', 'status_active', 'status_inactive'],
+                ]));
                 ?>
             </div>
 
@@ -348,9 +367,16 @@ $inactive_countries = $total_countries - $active_countries;
                                         <label for="country_name">Country Name</label>
                                     </th>
                                     <td>
-                                        <input type="text" id="country_name" name="country_name"
-                                            value="<?php echo esc_attr($edit_country->country_name); ?>"
-                                            class="regular-text" required>
+                                        <?php echo KIT_Commons::Linput([
+                                            'no_label' => true,
+                                            'name' => 'country_name',
+                                            'id' => 'country_name',
+                                            'type' => 'text',
+                                            'value' => $edit_country->country_name,
+                                            'preset' => '',
+                                            'class' => 'regular-text',
+                                            'special' => 'required',
+                                        ]); ?>
                                     </td>
                                 </tr>
                                 <tr>
@@ -358,9 +384,16 @@ $inactive_countries = $total_countries - $active_countries;
                                         <label for="country_code">Country Code</label>
                                     </th>
                                     <td>
-                                        <input type="text" id="country_code" name="country_code"
-                                            value="<?php echo esc_attr($edit_country->country_code); ?>"
-                                            class="regular-text uppercase" required>
+                                        <?php echo KIT_Commons::Linput([
+                                            'no_label' => true,
+                                            'name' => 'country_code',
+                                            'id' => 'country_code',
+                                            'type' => 'text',
+                                            'value' => $edit_country->country_code,
+                                            'preset' => '',
+                                            'class' => 'regular-text uppercase',
+                                            'special' => 'required',
+                                        ]); ?>
                                         <p class="description">Use ISO country codes (e.g., US, GB, ZA)</p>
                                     </td>
                                 </tr>
@@ -369,9 +402,19 @@ $inactive_countries = $total_countries - $active_countries;
                                         <label for="charge_group">Charge Group</label>
                                     </th>
                                     <td>
-                                        <input type="number" id="charge_group" name="charge_group"
-                                            value="<?php echo esc_attr($edit_country->charge_group); ?>"
-                                            min="0" max="9" class="small-text">
+                                        <?php
+                                        echo KIT_Commons::Lnumber([
+                                            'no_label' => true,
+                                            'label' => '',
+                                            'id' => 'charge_group',
+                                            'name' => 'charge_group',
+                                            'value' => (string) $edit_country->charge_group,
+                                            'min' => '0',
+                                            'max' => '9',
+                                            'preset' => '',
+                                            'class' => 'small-text',
+                                        ]);
+                                        ?>
                                         <p class="description">Pricing group (0-9)</p>
                                     </td>
                                 </tr>
@@ -379,8 +422,16 @@ $inactive_countries = $total_countries - $active_countries;
                                     <th scope="row">Status</th>
                                     <td>
                                         <label>
-                                            <input type="checkbox" name="is_active" value="1"
-                                                <?php checked($edit_country->is_active, 1); ?>>
+                                            <?php
+                                            echo KIT_Commons::Lcheckbox([
+                                                'no_label' => true,
+                                                'label' => '',
+                                                'name' => 'is_active',
+                                                'omit_id' => true,
+                                                'value' => '1',
+                                                'checked' => ((int) $edit_country->is_active === 1),
+                                            ]);
+                                            ?>
                                             Active (country will appear in selection lists)
                                         </label>
                                     </td>
@@ -405,9 +456,17 @@ $inactive_countries = $total_countries - $active_countries;
                                         <label for="country_name">Country Name</label>
                                     </th>
                                     <td>
-                                        <input type="text" id="country_name" name="country_name"
-                                            class="regular-text" required
-                                            placeholder="e.g., United States">
+                                        <?php echo KIT_Commons::Linput([
+                                            'no_label' => true,
+                                            'name' => 'country_name',
+                                            'id' => 'country_name',
+                                            'type' => 'text',
+                                            'value' => '',
+                                            'placeholder' => 'e.g., United States',
+                                            'preset' => '',
+                                            'class' => 'regular-text',
+                                            'special' => 'required',
+                                        ]); ?>
                                     </td>
                                 </tr>
                                 <tr>
@@ -415,9 +474,17 @@ $inactive_countries = $total_countries - $active_countries;
                                         <label for="country_code">Country Code</label>
                                     </th>
                                     <td>
-                                        <input type="text" id="country_code" name="country_code"
-                                            class="regular-text uppercase" required
-                                            placeholder="e.g., US">
+                                        <?php echo KIT_Commons::Linput([
+                                            'no_label' => true,
+                                            'name' => 'country_code',
+                                            'id' => 'country_code',
+                                            'type' => 'text',
+                                            'value' => '',
+                                            'placeholder' => 'e.g., US',
+                                            'preset' => '',
+                                            'class' => 'regular-text uppercase',
+                                            'special' => 'required',
+                                        ]); ?>
                                         <p class="description">Use ISO country codes (e.g., US, GB, ZA)</p>
                                     </td>
                                 </tr>
@@ -426,8 +493,19 @@ $inactive_countries = $total_countries - $active_countries;
                                         <label for="charge_group">Charge Group</label>
                                     </th>
                                     <td>
-                                        <input type="number" id="charge_group" name="charge_group"
-                                            value="1" min="0" max="9" class="small-text">
+                                        <?php
+                                        echo KIT_Commons::Lnumber([
+                                            'no_label' => true,
+                                            'label' => '',
+                                            'id' => 'charge_group',
+                                            'name' => 'charge_group',
+                                            'value' => '1',
+                                            'min' => '0',
+                                            'max' => '9',
+                                            'preset' => '',
+                                            'class' => 'small-text',
+                                        ]);
+                                        ?>
                                         <p class="description">Pricing group (0-9)</p>
                                     </td>
                                 </tr>
@@ -435,7 +513,16 @@ $inactive_countries = $total_countries - $active_countries;
                                     <th scope="row">Status</th>
                                     <td>
                                         <label>
-                                            <input type="checkbox" name="is_active" value="1" checked>
+                                            <?php
+                                            echo KIT_Commons::Lcheckbox([
+                                                'no_label' => true,
+                                                'label' => '',
+                                                'name' => 'is_active',
+                                                'omit_id' => true,
+                                                'value' => '1',
+                                                'checked' => true,
+                                            ]);
+                                            ?>
                                             Active (country will appear in selection lists)
                                         </label>
                                     </td>

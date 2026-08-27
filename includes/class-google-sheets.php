@@ -21,8 +21,36 @@ class Courier_Google_Sheets {
 	/** @var string|null Path to service account JSON key file */
 	protected static $credentials_path;
 
-	/** @var string Default spreadsheet ID (08600 waybills sheet) */
+	/**
+	 * Default spreadsheet ID — the LIVE working document, "08600Africa".
+	 *
+	 * Was '1p1jZowAa12d6bMsKSeW9j5yDB7jMTuxa6TT6MG2SPjQ' until 2026-08-05. That
+	 * document is titled "08600BackUp": a backup copy. Every seed was therefore
+	 * reading a stale snapshot — it held 1040 waybills against the live sheet's
+	 * 1132, so 98 waybills could never reach the database no matter how many
+	 * times the seed was run, and everything else came from an old copy. It also
+	 * lacks the source "Waybills" tab and the sync_errors tab entirely, and
+	 * carries a stray "Copy of kit_waybills" tab.
+	 *
+	 * This is the cause of the long-standing "the script pulls the wrong
+	 * information out of the spreadsheet" report.
+	 *
+	 * Override per-environment in wp-config.php without editing this file:
+	 *     define('COURIER_GOOGLE_SPREADSHEET_ID', '...');
+	 *
+	 * @var string
+	 */
 	protected static $default_spreadsheet_id = '1w-9PfeN198UoLp-LO-ZFUYYjWiewuIfsp9r-2lY_Xec';
+
+	/**
+	 * Drivers roster lives on 08600AfricaWaybills (tab Drivers / kit_drivers).
+	 * The live 08600Africa kit_drivers tab is a sync dump and is not authoritative.
+	 *
+	 * Override: define('COURIER_GOOGLE_DRIVERS_SPREADSHEET_ID', '...');
+	 *
+	 * @var string
+	 */
+	protected static $default_drivers_spreadsheet_id = '1yRoRdtOlDrCexnvnx0E2QBfe3xZq6NBpwZbCAQj6dak';
 
 	/** @var \Google_Client|null */
 	protected static $client;
@@ -62,15 +90,46 @@ class Courier_Google_Sheets {
 	}
 
 	/**
+	 * Spreadsheet ID for pull/seed reads (source). Prefers constant, then filter, then built-in default.
+	 *
+	 * @return string
+	 */
+	public static function get_source_spreadsheet_id() {
+		if (defined('COURIER_GOOGLE_SPREADSHEET_ID') && COURIER_GOOGLE_SPREADSHEET_ID) {
+			return COURIER_GOOGLE_SPREADSHEET_ID;
+		}
+		return (string) apply_filters('courier_google_spreadsheet_id', self::$default_spreadsheet_id);
+	}
+
+	/**
+	 * Spreadsheet that owns the driver roster (08600AfricaWaybills).
+	 */
+	public static function get_drivers_spreadsheet_id() {
+		if (defined('COURIER_GOOGLE_DRIVERS_SPREADSHEET_ID') && COURIER_GOOGLE_DRIVERS_SPREADSHEET_ID) {
+			return (string) COURIER_GOOGLE_DRIVERS_SPREADSHEET_ID;
+		}
+		return (string) apply_filters('courier_google_drivers_spreadsheet_id', self::$default_drivers_spreadsheet_id);
+	}
+
+	/**
+	 * Spreadsheet ID for push/auto-sync writes (destination). Falls back to source when unset.
+	 *
+	 * @return string
+	 */
+	public static function get_sync_spreadsheet_id() {
+		if (defined('COURIER_GOOGLE_SYNC_SPREADSHEET_ID') && COURIER_GOOGLE_SYNC_SPREADSHEET_ID) {
+			return COURIER_GOOGLE_SYNC_SPREADSHEET_ID;
+		}
+		return (string) apply_filters('courier_google_sync_spreadsheet_id', self::get_source_spreadsheet_id());
+	}
+
+	/**
 	 * Get default spreadsheet ID. Prefers constant, then filter, then built-in default.
 	 *
 	 * @return string
 	 */
 	public static function get_default_spreadsheet_id() {
-		if (defined('COURIER_GOOGLE_SPREADSHEET_ID') && COURIER_GOOGLE_SPREADSHEET_ID) {
-			return COURIER_GOOGLE_SPREADSHEET_ID;
-		}
-		return (string) apply_filters('courier_google_spreadsheet_id', self::$default_spreadsheet_id);
+		return self::get_source_spreadsheet_id();
 	}
 
 	/**
@@ -646,7 +705,7 @@ class Courier_Google_Sheets {
 	 * @param string      $spreadsheet_id Optional.
 	 * @return bool
 	 */
-	public static function clear_range($sheet_name, $range = 'A2:Z10000', $spreadsheet_id = '') {
+	public static function clear_range($sheet_name, $range = 'A2:Z', $spreadsheet_id = '') {
 		if ($spreadsheet_id === '') {
 			$spreadsheet_id = self::get_default_spreadsheet_id();
 		}
@@ -666,5 +725,486 @@ class Courier_Google_Sheets {
 	public static function is_configured() {
 		$path = self::get_credentials_path();
 		return $path !== '' && is_readable($path);
+	}
+
+	/**
+	 * Convert 0-based column index to A1 column letters (0 → A, 25 → Z, 26 → AA).
+	 */
+	public static function column_letter(int $index_0based): string {
+		$n = $index_0based + 1;
+		$s = '';
+		while ($n > 0) {
+			$n--;
+			$s = chr(65 + ($n % 26)) . $s;
+			$n = intdiv($n, 26);
+		}
+		return $s;
+	}
+
+	/**
+	 * Run a Sheets API call with retries on HTTP 429 rate limits.
+	 *
+	 * @template T
+	 * @param callable():T $fn
+	 * @return T
+	 */
+	protected static function with_sheets_retry(callable $fn, int $max_attempts = 8) {
+		$attempt = 0;
+		$delay = 15;
+		while (true) {
+			$attempt++;
+			try {
+				return $fn();
+			} catch (\Throwable $e) {
+				$msg = $e->getMessage();
+				$is_429 = (strpos($msg, '429') !== false)
+					|| (stripos($msg, 'RATE_LIMIT') !== false)
+					|| (stripos($msg, 'Quota exceeded') !== false);
+				if (!$is_429 || $attempt >= $max_attempts) {
+					throw $e;
+				}
+				sleep($delay);
+				$delay = min(90, (int) ceil($delay * 1.5));
+			}
+		}
+	}
+
+	/**
+	 * Ensure a tab named $title exists; return its sheetId.
+	 *
+	 * @return int sheetId
+	 */
+	/**
+	 * Ensure a tab named $title exists; return [sheetId, rowCount, columnCount].
+	 *
+	 * @return array{0:int,1:int,2:int}
+	 */
+	public static function ensure_sheet(string $title, string $spreadsheet_id = '', int $min_rows = 1000, int $min_cols = 26): array {
+		if ($spreadsheet_id === '') {
+			$spreadsheet_id = self::get_default_spreadsheet_id();
+		}
+		$service = self::get_service();
+		$ss = self::with_sheets_retry(static function () use ($service, $spreadsheet_id) {
+			return $service->spreadsheets->get($spreadsheet_id, [
+				'fields' => 'sheets(properties(sheetId,title,gridProperties(rowCount,columnCount)),tables)',
+			]);
+		});
+		$title_lc = strtolower(trim($title));
+		foreach ($ss->getSheets() as $sheet) {
+			$props = $sheet->getProperties();
+			if (strtolower(trim((string) $props->getTitle())) === $title_lc) {
+				$gp = $props->getGridProperties();
+				return [
+					(int) $props->getSheetId(),
+					$gp ? (int) $gp->getRowCount() : 0,
+					$gp ? (int) $gp->getColumnCount() : 0,
+				];
+			}
+		}
+
+		$min_rows = max(2, $min_rows);
+		$min_cols = max(1, $min_cols);
+		$body = new \Google_Service_Sheets_BatchUpdateSpreadsheetRequest([
+			'requests' => [[
+				'addSheet' => [
+					'properties' => [
+						'title' => $title,
+						'gridProperties' => [
+							'rowCount' => $min_rows,
+							'columnCount' => $min_cols,
+						],
+					],
+				],
+			]],
+		]);
+		$resp = self::with_sheets_retry(static function () use ($service, $spreadsheet_id, $body) {
+			return $service->spreadsheets->batchUpdate($spreadsheet_id, $body);
+		});
+		$replies = $resp->getReplies();
+		$added = $replies[0]->getAddSheet() ?? null;
+		if ($added && $added->getProperties()) {
+			return [(int) $added->getProperties()->getSheetId(), $min_rows, $min_cols];
+		}
+		throw new \Exception('Failed to create sheet tab: ' . $title);
+	}
+
+	/**
+	 * Resize a sheet grid so it can hold the given rows/columns (no-op if already large enough).
+	 */
+	public static function resize_sheet_grid(int $sheet_id, int $row_count, int $column_count, string $spreadsheet_id = '', int $current_rows = 0, int $current_cols = 0): void {
+		if ($spreadsheet_id === '') {
+			$spreadsheet_id = self::get_default_spreadsheet_id();
+		}
+		$row_count = max(2, $row_count);
+		$column_count = max(1, $column_count);
+		if ($current_rows >= $row_count && $current_cols >= $column_count) {
+			return;
+		}
+		$body = new \Google_Service_Sheets_BatchUpdateSpreadsheetRequest([
+			'requests' => [[
+				'updateSheetProperties' => [
+					'properties' => [
+						'sheetId' => $sheet_id,
+						'gridProperties' => [
+							'rowCount' => max($current_rows, $row_count),
+							'columnCount' => max($current_cols, $column_count),
+						],
+					],
+					'fields' => 'gridProperties.rowCount,gridProperties.columnCount',
+				],
+			]],
+		]);
+		self::with_sheets_retry(static function () use ($spreadsheet_id, $body) {
+			self::get_service()->spreadsheets->batchUpdate($spreadsheet_id, $body);
+		});
+	}
+
+	/**
+	 * Collect deleteTable requests for tables on $sheet_id or named $table_name.
+	 *
+	 * @param \Google_Service_Sheets_Spreadsheet $ss
+	 * @return array<int, array>
+	 */
+	protected static function collect_delete_table_requests($ss, int $sheet_id, string $table_name = ''): array {
+		$requests = [];
+		$name_lc = strtolower(trim($table_name));
+		foreach ($ss->getSheets() as $sheet) {
+			$tables = method_exists($sheet, 'getTables') ? ($sheet->getTables() ?: []) : [];
+			foreach ($tables as $table) {
+				$tid = (string) $table->getTableId();
+				if ($tid === '') {
+					continue;
+				}
+				$range = $table->getRange();
+				$on_sheet = $range && (int) $range->getSheetId() === $sheet_id;
+				$name_match = $name_lc !== '' && strtolower(trim((string) $table->getName())) === $name_lc;
+				if ($on_sheet || $name_match) {
+					$requests[] = ['deleteTable' => ['tableId' => $tid]];
+				}
+			}
+		}
+		return $requests;
+	}
+
+	/**
+	 * Delete every Google Sheets Table whose range sits on $sheet_id, or whose name matches $table_name.
+	 */
+	public static function delete_tables_for_sheet(int $sheet_id, string $table_name = '', string $spreadsheet_id = ''): void {
+		if ($spreadsheet_id === '') {
+			$spreadsheet_id = self::get_default_spreadsheet_id();
+		}
+		$service = self::get_service();
+		try {
+			$ss = self::with_sheets_retry(static function () use ($service, $spreadsheet_id) {
+				return $service->spreadsheets->get($spreadsheet_id, ['fields' => 'sheets(tables)']);
+			});
+		} catch (\Throwable $e) {
+			return;
+		}
+		$requests = self::collect_delete_table_requests($ss, $sheet_id, $table_name);
+		if ($requests) {
+			$body = new \Google_Service_Sheets_BatchUpdateSpreadsheetRequest(['requests' => $requests]);
+			self::with_sheets_retry(static function () use ($service, $spreadsheet_id, $body) {
+				$service->spreadsheets->batchUpdate($spreadsheet_id, $body);
+			});
+		}
+	}
+
+	/**
+	 * Create a Google Sheets Table covering header + data, named like the kit_* DB table.
+	 */
+	public static function add_kit_table(int $sheet_id, string $table_name, int $num_rows_including_header, int $num_cols, string $spreadsheet_id = ''): void {
+		if ($spreadsheet_id === '') {
+			$spreadsheet_id = self::get_default_spreadsheet_id();
+		}
+		$num_rows_including_header = max(1, $num_rows_including_header);
+		$num_cols = max(1, $num_cols);
+		$body = new \Google_Service_Sheets_BatchUpdateSpreadsheetRequest([
+			'requests' => [[
+				'addTable' => [
+					'table' => [
+						'name' => $table_name,
+						'range' => [
+							'sheetId' => $sheet_id,
+							'startRowIndex' => 0,
+							'endRowIndex' => $num_rows_including_header,
+							'startColumnIndex' => 0,
+							'endColumnIndex' => $num_cols,
+						],
+					],
+				],
+			]],
+		]);
+		self::with_sheets_retry(static function () use ($spreadsheet_id, $body) {
+			self::get_service()->spreadsheets->batchUpdate($spreadsheet_id, $body);
+		});
+	}
+
+	/**
+	 * Create/refresh a kit_* sheet from a MySQL table: headers = column names, rows = data,
+	 * then wrap the range in a Google Sheets Table named after the kit_* table.
+	 *
+	 * @param string $kit_table e.g. kit_customers (without wp_ prefix)
+	 * @return array{success:bool,message:string,sheet:string,rows:int,cols:int}
+	 */
+	public static function export_kit_db_table(string $kit_table, string $spreadsheet_id = ''): array {
+		global $wpdb;
+
+		$kit_table = preg_replace('/[^a-z0-9_]/', '', strtolower($kit_table));
+		if ($kit_table === '' || strpos($kit_table, 'kit_') !== 0) {
+			return ['success' => false, 'message' => 'Invalid kit_* table name.', 'sheet' => '', 'rows' => 0, 'cols' => 0];
+		}
+		if ($spreadsheet_id === '') {
+			$spreadsheet_id = self::get_default_spreadsheet_id();
+		}
+
+		$db_table = $wpdb->prefix . $kit_table;
+		$exists = $wpdb->get_var($wpdb->prepare('SHOW TABLES LIKE %s', $db_table));
+		if ($exists !== $db_table) {
+			return ['success' => false, 'message' => "DB table missing: {$db_table}", 'sheet' => $kit_table, 'rows' => 0, 'cols' => 0];
+		}
+
+		$columns = $wpdb->get_col("SHOW COLUMNS FROM `{$db_table}`");
+		if (!$columns) {
+			return ['success' => false, 'message' => "No columns for {$db_table}", 'sheet' => $kit_table, 'rows' => 0, 'cols' => 0];
+		}
+		$col_count = count($columns);
+		$end_col = self::column_letter($col_count - 1);
+
+		$db_rows = $wpdb->get_results("SELECT * FROM `{$db_table}`", ARRAY_A) ?: [];
+		$values = [$columns];
+		foreach ($db_rows as $row) {
+			$line = [];
+			foreach ($columns as $col) {
+				$v = $row[$col] ?? '';
+				if ($v === null) {
+					$v = '';
+				} elseif (is_bool($v)) {
+					$v = $v ? '1' : '0';
+				} else {
+					$v = (string) $v;
+				}
+				$line[] = $v;
+			}
+			$values[] = $line;
+		}
+
+		$total_rows = count($values); // includes header
+		$need_rows = max($total_rows + 50, 100);
+		$need_cols = max($col_count + 2, 10);
+
+		$service = self::get_service();
+		$ss = self::with_sheets_retry(static function () use ($service, $spreadsheet_id) {
+			return $service->spreadsheets->get($spreadsheet_id, [
+				'fields' => 'sheets(properties(sheetId,title,gridProperties(rowCount,columnCount)),tables)',
+			]);
+		});
+
+		$sheet_id = null;
+		$cur_rows = 0;
+		$cur_cols = 0;
+		$title_lc = strtolower(trim($kit_table));
+		foreach ($ss->getSheets() as $sheet) {
+			$props = $sheet->getProperties();
+			if (strtolower(trim((string) $props->getTitle())) === $title_lc) {
+				$sheet_id = (int) $props->getSheetId();
+				$gp = $props->getGridProperties();
+				$cur_rows = $gp ? (int) $gp->getRowCount() : 0;
+				$cur_cols = $gp ? (int) $gp->getColumnCount() : 0;
+				break;
+			}
+		}
+
+		$batch_requests = [];
+		if ($sheet_id === null) {
+			$batch_requests[] = [
+				'addSheet' => [
+					'properties' => [
+						'title' => $kit_table,
+						'gridProperties' => [
+							'rowCount' => $need_rows,
+							'columnCount' => $need_cols,
+						],
+					],
+				],
+			];
+		} else {
+			$batch_requests = array_merge(
+				$batch_requests,
+				self::collect_delete_table_requests($ss, $sheet_id, $kit_table)
+			);
+			if ($cur_rows < $need_rows || $cur_cols < $need_cols) {
+				$batch_requests[] = [
+					'updateSheetProperties' => [
+						'properties' => [
+							'sheetId' => $sheet_id,
+							'gridProperties' => [
+								'rowCount' => max($cur_rows, $need_rows),
+								'columnCount' => max($cur_cols, $need_cols),
+							],
+						],
+						'fields' => 'gridProperties.rowCount,gridProperties.columnCount',
+					],
+				];
+			}
+		}
+
+		if ($batch_requests) {
+			$body = new \Google_Service_Sheets_BatchUpdateSpreadsheetRequest(['requests' => $batch_requests]);
+			$resp = self::with_sheets_retry(static function () use ($service, $spreadsheet_id, $body) {
+				return $service->spreadsheets->batchUpdate($spreadsheet_id, $body);
+			});
+			if ($sheet_id === null) {
+				$replies = $resp->getReplies();
+				foreach ($replies as $reply) {
+					$added = $reply->getAddSheet();
+					if ($added && $added->getProperties()) {
+						$sheet_id = (int) $added->getProperties()->getSheetId();
+						break;
+					}
+				}
+			}
+		}
+		if ($sheet_id === null) {
+			return ['success' => false, 'message' => 'Could not resolve sheetId for ' . $kit_table, 'sheet' => $kit_table, 'rows' => 0, 'cols' => 0];
+		}
+
+		// Write data (overwrite). Chunk only when payload is large.
+		$chunk = 800;
+		for ($i = 0; $i < $total_rows; $i += $chunk) {
+			$slice = array_slice($values, $i, $chunk);
+			$start = $i + 1;
+			$end = $i + count($slice);
+			$range = $kit_table . '!A' . $start . ':' . $end_col . $end;
+			$vr = new \Google_Service_Sheets_ValueRange(['values' => $slice]);
+			self::with_sheets_retry(static function () use ($service, $spreadsheet_id, $range, $vr) {
+				$service->spreadsheets_values->update(
+					$spreadsheet_id,
+					$range,
+					$vr,
+					['valueInputOption' => 'RAW']
+				);
+			});
+		}
+
+		$table_ok = true;
+		$table_err = '';
+		try {
+			// Re-delete by name in case of race, then add Table in one batch.
+			$ss2 = self::with_sheets_retry(static function () use ($service, $spreadsheet_id) {
+				return $service->spreadsheets->get($spreadsheet_id, ['fields' => 'sheets(tables)']);
+			});
+			$reqs = self::collect_delete_table_requests($ss2, $sheet_id, $kit_table);
+			$reqs[] = [
+				'addTable' => [
+					'table' => [
+						'name' => $kit_table,
+						'range' => [
+							'sheetId' => $sheet_id,
+							'startRowIndex' => 0,
+							'endRowIndex' => $total_rows,
+							'startColumnIndex' => 0,
+							'endColumnIndex' => $col_count,
+						],
+					],
+				],
+			];
+			$body = new \Google_Service_Sheets_BatchUpdateSpreadsheetRequest(['requests' => $reqs]);
+			self::with_sheets_retry(static function () use ($service, $spreadsheet_id, $body) {
+				$service->spreadsheets->batchUpdate($spreadsheet_id, $body);
+			});
+		} catch (\Throwable $e) {
+			$table_ok = false;
+			$table_err = $e->getMessage();
+		}
+
+		return [
+			'success' => true,
+			'message' => $table_ok
+				? sprintf('Exported %d data rows to %s with Table "%s".', count($db_rows), $kit_table, $kit_table)
+				: sprintf('Exported %d data rows to %s; Table create failed: %s', count($db_rows), $kit_table, $table_err),
+			'sheet' => $kit_table,
+			'rows' => count($db_rows),
+			'cols' => $col_count,
+		];
+	}
+
+	/**
+	 * Export every install kit_* table (and sync audit tables) to matching sheet tabs.
+	 *
+	 * @param string   $spreadsheet_id
+	 * @param string[] $only optional subset of kit_* names to export
+	 * @return array{success:bool,message:string,results:array<string,array>}
+	 */
+	public static function export_all_kit_tables(string $spreadsheet_id = '', array $only = []): array {
+		$tables = [
+			'kit_customers',
+			'kit_company_customers',
+			'kit_services',
+			'kit_operating_countries',
+			'kit_operating_cities',
+			'kit_shipping_directions',
+			'kit_shipping_rate_types',
+			'kit_shipping_rates_mass',
+			'kit_shipping_rates_volume',
+			'kit_shipping_dedicated_truck_rates',
+			'kit_drivers',
+			'kit_deliveries',
+			'kit_company_details',
+			'kit_waybills',
+			'kit_waybill_items',
+			'kit_quotations',
+			'kit_invoices',
+			'kit_discounts',
+			'kit_sync_runs',
+			'kit_sync_run_rows',
+		];
+		if ($only) {
+			$only_map = array_fill_keys(array_map('strtolower', $only), true);
+			$tables = array_values(array_filter($tables, static function ($t) use ($only_map) {
+				return isset($only_map[$t]);
+			}));
+		}
+
+		$results = [];
+		$errors = [];
+		foreach ($tables as $i => $table) {
+			try {
+				$r = self::export_kit_db_table($table, $spreadsheet_id);
+			} catch (\Throwable $e) {
+				$r = [
+					'success' => false,
+					'message' => $e->getMessage(),
+					'sheet' => $table,
+					'rows' => 0,
+					'cols' => 0,
+				];
+			}
+			$results[$table] = $r;
+			if (empty($r['success'])) {
+				$errors[] = $table . ': ' . ($r['message'] ?? 'failed');
+			}
+			// Stay under WriteRequestsPerMinutePerUser (60/min).
+			if ($i < count($tables) - 1) {
+				sleep(3);
+			}
+		}
+
+		if ($errors) {
+			return [
+				'success' => false,
+				'message' => 'Some exports failed — ' . implode('; ', $errors),
+				'results' => $results,
+			];
+		}
+		$total = 0;
+		foreach ($results as $r) {
+			$total += (int) ($r['rows'] ?? 0);
+		}
+		return [
+			'success' => true,
+			'message' => sprintf('Exported %d tables (%d data rows) to kit_* sheets with Tables.', count($tables), $total),
+			'results' => $results,
+		];
 	}
 }

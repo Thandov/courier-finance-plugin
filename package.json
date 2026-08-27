@@ -5,7 +5,10 @@
   "scripts": {
     "dev:css": "tailwindcss -i ./assets/css/tailwind.css -o ./assets/css/frontend.css --watch",
     "dev:serve": "browser-sync start --proxy 'http://localhost:8888' --port 3000 --files '/Applications/MAMP/htdocs/08600/wp-content/plugins/courier-finance-plugin/**/*.{php,js,css}' --no-open --no-ui --ghost-mode false",
-    "dev": "npm-run-all --parallel dev:css dev:serve"
+    "dev": "npm-run-all --parallel dev:css dev:serve",
+    "build:css": "tailwindcss -i ./assets/css/tailwind.css -o ./assets/css/frontend.css --minify",
+    "build:js": "terser js/*.js -o js/kitscript.min.js -c -m --source-map false --comments false",
+    "build": "npm run build:css && npm run build:js"
   },
   "keywords": [],
   "author": "",
@@ -16,6 +19,7 @@
     "browser-sync": "^3.0.3",
     "npm-run-all": "^4.1.5",
     "postcss": "^8.5.3",
-    "tailwindcss": "^3.4.17"
+    "tailwindcss": "^3.4.17",
+    "terser": "^5.36.0"
   }
 }

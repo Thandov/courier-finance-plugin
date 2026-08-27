@@ -7,13 +7,17 @@ if (!defined('ABSPATH')) {
  * Global component for displaying waybill information in a minimalistic, professional format
  * 
  * @param array $waybill Waybill data array (must include waybill_no, tracking_number, product_invoice_number, product_invoice_amount)
- *                       Optional: delivery_id, delivery_reference (for delivery truck link)
+ *                       Optional: customer_id, customer_name, customer_surname, company_name/company,
+ *                       delivery_id, delivery_reference (for delivery truck link)
  * @param string $waybill_id Optional waybill ID for linking
  * @param array $options Optional configuration:
  *   - 'show_amount' (bool): Whether to show the amount (default: true, respects KIT_User_Roles::can_see_prices())
+ *   - 'amount' (float): Amount to display instead of the stored product_invoice_amount. Pass this
+ *     when the caller has already resolved the authoritative total, so the strip cannot disagree
+ *     with the total shown elsewhere on the same screen.
  *   - 'currency_symbol' (string): Currency symbol to use (default: KIT_Commons::currency())
  *   - 'class' (string): Additional CSS classes for the container
- *   - 'exclude' (array): Array of field names to exclude from display. Valid values: 'waybill', 'tracking', 'invoice', 'amount', 'delivery'
+ *   - 'exclude' (array): Array of field names to exclude from display. Valid values: 'waybill', 'customer', 'tracking', 'invoice', 'amount', 'delivery'
  *     Aliases supported: 'grand_total', 'total', 'price' (all map to 'amount')
  *   - 'enable_js_updates' (bool): Whether to enable JavaScript updates for the amount field (default: false)
  *     When enabled, uses id="waybilltotalMockup" so existing JS can update it. Only enable for one instance per page.
@@ -32,6 +36,9 @@ if (isset($waybill_info_options) && is_array($waybill_info_options)) {
     $options = [];
 }
 $show_amount = isset($options['show_amount']) ? $options['show_amount'] : true;
+$amount_value = isset($options['amount'])
+    ? (float) $options['amount']
+    : (float) ($waybill['product_invoice_amount'] ?? 0);
 $currency_symbol = isset($options['currency_symbol']) ? $options['currency_symbol'] : (class_exists('KIT_Commons') ? KIT_Commons::currency() : 'R');
 $container_class = isset($options['class']) ? ' ' . esc_attr($options['class']) : '';
 $exclude_fields = isset($options['exclude']) && is_array($options['exclude']) ? $options['exclude'] : [];
@@ -73,74 +80,126 @@ if (class_exists('KIT_User_Roles')) {
 ?>
 
 <!-- Professional minimalistic waybill info display -->
-<div class="rounded-lg border border-gray-200 bg-white shadow-sm p-4 min-w-0 overflow-hidden<?php echo $container_class; ?>">
-<!-- distribute the content evenly across the container -->
-<div class="flex flex-nowrap justify-between items-center gap-x-8 text-sm min-w-0 overflow-x-auto">
+<div class="rounded-lg border border-gray-200 bg-white shadow-sm p-4 min-w-0<?php echo $container_class; ?>">
+<?php
+// Wrapping row, not a nowrap row with overflow-x-auto: at ~1486px the old strip
+// pushed the amount behind a horizontal scrollbar, hiding the one figure the page
+// exists to state. Wrapping keeps every cell readable at any width. Dividers were
+// dropped with the same change — a 1px rule cannot separate cells across two rows.
+?>
+<div class="flex flex-wrap items-center gap-6 text-sm min-w-0">
         <?php
-        // Track which fields are visible to conditionally show dividers
-        $visible_fields = [];
-        
         // Waybill Number
         if (!$is_excluded('waybill')) {
-            $visible_fields[] = 'waybill';
         ?>
-        <div class="text-center items-center gap-2 shrink-0">
-            <span class="text-gray-500 text-xs font-medium uppercase tracking-wide">Waybill</span>
-            <br>
-            <span class="text-gray-900 font-semibold text-base"><?php echo esc_html($waybill['waybill_no'] ?? 'N/A'); ?></span>
+        <div class="min-w-0">
+            <div class="text-gray-500 text-xs font-medium uppercase tracking-wide">Waybill</div>
+            <div class="text-gray-900 font-semibold text-base"><?php echo esc_html($waybill['waybill_no'] ?? 'N/A'); ?></div>
+        </div>
+        <?php
+        }
+
+        // Customer (linked to customer detail when possible)
+        if (!$is_excluded('customer')) {
+            $customer_id = intval($waybill['customer_id'] ?? $waybill['cust_id'] ?? 0);
+            $cust_name = trim((string) ($waybill['customer_name'] ?? $waybill['name'] ?? ''));
+            $cust_surname = trim((string) ($waybill['customer_surname'] ?? $waybill['surname'] ?? ''));
+            $company = trim((string) ($waybill['company_name'] ?? $waybill['company'] ?? $waybill['customer_company'] ?? ''));
+            $is_placeholder = static function ($value): bool {
+                $v = strtolower(trim((string) $value));
+                return $v === '' || in_array($v, ['0', 'null', 'n/a', 'na', 'none', '-', '--'], true);
+            };
+            if ($is_placeholder($cust_name)) {
+                $cust_name = '';
+            }
+            if ($is_placeholder($cust_surname)) {
+                $cust_surname = '';
+            }
+            if ($is_placeholder($company)) {
+                $company = '';
+            }
+            $person_name = trim($cust_name . ' ' . $cust_surname);
+            $company_is_displayable = ($company !== '' && !in_array(strtolower($company), ['individual', '1ndividual', 'private'], true));
+            if (class_exists('KIT_Company_Customers') && $company !== '' && KIT_Company_Customers::is_placeholder_company($company)) {
+                $company_is_displayable = false;
+            }
+            if ($company_is_displayable && $person_name !== '' && strcasecmp($person_name, $company) !== 0) {
+                $customer_display = $person_name . ' · ' . $company;
+            } elseif ($company_is_displayable) {
+                $customer_display = $company;
+            } else {
+                $customer_display = $person_name;
+            }
+            if ($customer_display === '') {
+                $customer_display = 'N/A';
+            }
+            $customer_url = $customer_id > 0
+                ? '?page=08600-customers&view_customer=' . $customer_id
+                : '';
+        ?>
+        <div class="min-w-0 max-w-xs">
+            <div class="text-gray-500 text-xs font-medium uppercase tracking-wide">Customer</div>
+            <?php if ($customer_url !== '' && $customer_display !== 'N/A'): ?>
+                <a
+                    href="<?php echo esc_url($customer_url); ?>"
+                    class="font-semibold text-base text-blue-600 hover:text-blue-800 hover:underline inline-block max-w-full truncate"
+                    target="_blank"
+                    rel="noopener"
+                    title="<?php echo esc_attr($customer_display); ?>"
+                ><?php echo esc_html($customer_display); ?></a>
+            <?php else: ?>
+                <span class="text-gray-900 font-semibold text-base inline-block max-w-full truncate" title="<?php echo esc_attr($customer_display); ?>"><?php echo esc_html($customer_display); ?></span>
+            <?php endif; ?>
         </div>
         <?php
         }
         
         // Tracking Number
         if (!$is_excluded('tracking')) {
-            if (!empty($visible_fields)): ?>
-                <div class="hidden sm:block w-px h-5 bg-gray-200"></div>
-            <?php endif;
-            $visible_fields[] = 'tracking';
         ?>
-        <div class="text-center items-center gap-2 shrink-0">
-            <span class="text-gray-500 text-xs font-medium uppercase tracking-wide">Tracking</span>
-            <br>
-            <span class="text-gray-900 font-semibold text-base"><?php echo esc_html($waybill['tracking_number'] ?? 'N/A'); ?></span>
+        <div class="min-w-0">
+            <div class="text-gray-500 text-xs font-medium uppercase tracking-wide">Tracking</div>
+            <div class="text-gray-900 font-semibold text-base"><?php echo esc_html($waybill['tracking_number'] ?? 'N/A'); ?></div>
         </div>
         <?php
         }
         
         // Invoice Number
         if (!$is_excluded('invoice')) {
-            if (!empty($visible_fields)): ?>
-                <div class="hidden sm:block w-px h-5 bg-gray-200"></div>
-            <?php endif;
-            $visible_fields[] = 'invoice';
         ?>
-        <div class="text-center items-center gap-2 shrink-0">
-            <span class="text-gray-500 text-xs font-medium uppercase tracking-wide">Invoice</span>
-            <br>
-            <span class="text-gray-900 font-semibold text-base"><?php echo esc_html($waybill['product_invoice_number'] ?? 'N/A'); ?></span>
+        <div class="min-w-0">
+            <div class="text-gray-500 text-xs font-medium uppercase tracking-wide">Invoice</div>
+            <div class="text-gray-900 font-semibold text-base"><?php echo esc_html($waybill['product_invoice_number'] ?? 'N/A'); ?></div>
         </div>
         <?php
         }
         
         // Delivery Truck
         if (!$is_excluded('delivery')) {
-            if (!empty($visible_fields)): ?>
-                <div class="hidden sm:block w-px h-5 bg-gray-200"></div>
-            <?php endif;
-            $visible_fields[] = 'delivery';
             $delivery_id = intval($waybill['delivery_id'] ?? 0);
-            $delivery_reference = $waybill['delivery_reference'] ?? '';
+            $delivery_reference = isset($waybill['delivery_reference']) ? (string) $waybill['delivery_reference'] : '';
+            $warehouse_flag = isset($waybill['warehouse']) && (intval($waybill['warehouse']) === 1 || $waybill['warehouse'] === true || $waybill['warehouse'] === '1');
+            $is_pending_delivery_ref = $delivery_reference !== '' && strcasecmp(trim($delivery_reference), 'pending') === 0;
+            $show_as_warehouse = $warehouse_flag || $is_pending_delivery_ref;
             $tooltip_id = 'delivery-tooltip-' . uniqid();
         ?>
-        <div class="text-center items-center gap-2 relative shrink-0">
-            <span class="text-gray-500 text-xs font-medium uppercase tracking-wide">Delivery</span>
-            <br>
-            <?php if ($delivery_id > 0 && !empty($delivery_reference)): ?>
+        <div class="min-w-0 max-w-xs relative">
+            <div class="text-gray-500 text-xs font-medium uppercase tracking-wide">Delivery</div>
+            <?php if ($show_as_warehouse): ?>
+                <span
+                    class="text-gray-900 font-semibold text-base custom-tooltip-trigger"
+                    tabindex="0"
+                    aria-describedby="<?php echo esc_attr($tooltip_id); ?>"
+                    data-tooltip-id="<?php echo esc_attr($tooltip_id); ?>"
+                    data-tooltip-text="<?php echo esc_attr($is_pending_delivery_ref ? 'Warehouse (system pending delivery)' : 'Waybill is stored in warehouse'); ?>"
+                >Warehouse</span>
+            <?php elseif ($delivery_id > 0 && !empty($delivery_reference)): ?>
                 <a
                     href="?page=view-deliveries&delivery_id=<?php echo urlencode($delivery_id); ?>"
                     class="font-semibold text-base text-blue-600 hover:text-blue-800 hover:underline custom-tooltip-trigger"
                     target="_blank"
                     rel="noopener"
+                    aria-describedby="<?php echo esc_attr($tooltip_id); ?>"
                     data-tooltip-id="<?php echo esc_attr($tooltip_id); ?>"
                     data-tooltip-text="Open delivery <?php echo esc_attr($delivery_reference); ?> in a new tab"
                 >
@@ -150,6 +209,8 @@ if (class_exists('KIT_User_Roles')) {
                 <span
                     class="text-gray-900 font-semibold text-base custom-tooltip-trigger"
                     <?php if (!empty($delivery_reference)): ?>
+                        tabindex="0"
+                        aria-describedby="<?php echo esc_attr($tooltip_id); ?>"
                         data-tooltip-id="<?php echo esc_attr($tooltip_id); ?>"
                         data-tooltip-text="<?php echo esc_attr($delivery_reference); ?>"
                     <?php endif; ?>
@@ -159,7 +220,7 @@ if (class_exists('KIT_User_Roles')) {
             <?php endif; ?>
             
             <!-- Custom Tooltip -->
-            <div id="<?php echo esc_attr($tooltip_id); ?>" class="custom-tooltip">
+            <div id="<?php echo esc_attr($tooltip_id); ?>" class="custom-tooltip" role="tooltip">
                 <div class="custom-tooltip-arrow"></div>
                 <div class="custom-tooltip-content">
                     <div class="custom-tooltip-icon">
@@ -176,20 +237,15 @@ if (class_exists('KIT_User_Roles')) {
         <?php
         }
         
-        // Amount
+        // Grand total — same label as the Cost Summary line it repeats, and pushed to
+        // the end of the row so the figure reads as the row's conclusion.
         if ($can_show_amount && !$is_excluded('amount')) {
-            if (!empty($visible_fields)): ?>
-                <div class="hidden sm:block w-px h-5 bg-gray-200"></div>
-            <?php endif;
-            $visible_fields[] = 'amount';
         ?>
-        <div class="text-center items-center gap-2 shrink-0">
-            <span class="text-gray-500 text-xs font-medium uppercase tracking-wide">Amount</span>
-            <br>
-            <span class="text-gray-900 font-semibold text-base">
-                <?php echo esc_html($currency_symbol); ?>
-                <span class="waybilltotalMockup"<?php echo $enable_js_updates ? ' id="waybilltotalMockup"' : ''; ?>><?php echo number_format($waybill['product_invoice_amount'] ?? 0, 2); ?></span>
-            </span>
+        <div class="w-full sm:w-auto sm:ml-auto text-left sm:text-right shrink-0">
+            <div class="text-gray-500 text-xs font-medium uppercase tracking-wide whitespace-nowrap">Grand Total</div>
+            <div class="text-gray-900 font-semibold text-xl leading-tight tabular-nums whitespace-nowrap">
+                <span class="waybilltotalMockup"<?php echo $enable_js_updates ? ' id="waybilltotalMockup"' : ''; ?>><?php echo esc_html(KIT_Commons::money($amount_value)); ?></span>
+            </div>
         </div>
         <?php
         }
@@ -228,15 +284,7 @@ if (class_exists('KIT_User_Roles')) {
 }
 
 .custom-tooltip-icon {
-    width: 32px;
-    height: 32px;
-    border-radius: 50%;
-    background: linear-gradient(135deg, #a855f7 0%, #3b82f6 100%);
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    flex-shrink: 0;
-    color: white;
+    display: none;
 }
 
 .custom-tooltip-text {
@@ -262,6 +310,12 @@ if (class_exists('KIT_User_Roles')) {
     cursor: pointer;
     position: relative;
 }
+
+@media print {
+    .custom-tooltip {
+        display: none !important;
+    }
+}
 </style>
 
 <script>
@@ -280,14 +334,18 @@ if (class_exists('KIT_User_Roles')) {
             if (tooltipText && tooltip.querySelector('.tooltip-message')) {
                 tooltip.querySelector('.tooltip-message').textContent = tooltipText;
             }
-            
-            trigger.addEventListener('mouseenter', function() {
+
+            function show() {
                 tooltip.classList.add('active');
-            });
-            
-            trigger.addEventListener('mouseleave', function() {
+            }
+            function hide() {
                 tooltip.classList.remove('active');
-            });
+            }
+            
+            trigger.addEventListener('mouseenter', show);
+            trigger.addEventListener('mouseleave', hide);
+            trigger.addEventListener('focus', show);
+            trigger.addEventListener('blur', hide);
         });
     });
 })();

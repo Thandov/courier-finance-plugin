@@ -62,10 +62,9 @@ class Bulk_Invoice_Builder {
             return ['error' => 'Customer not found'];
         }
 
-        $company = $wpdb->get_row("SELECT * FROM {$wpdb->prefix}kit_company_details LIMIT 1", ARRAY_A);
+        $company = class_exists('KIT_Company') ? KIT_Company::get_details_array() : [];
 
         $waybill_numbers = [];
-        $waybill_descriptions = [];
         $transport_rows = [];
         $aggregated_items = [];
         $aggregated_misc = [];
@@ -93,16 +92,6 @@ class Bulk_Invoice_Builder {
             $waybill = (object) array_map(function ($v) {
                 return $v === null ? '' : $v;
             }, (array) $quotation->waybill);
-
-            if (!empty($waybill->miscellaneous)) {
-                $misc_data = maybe_unserialize($waybill->miscellaneous);
-                if (is_array($misc_data) && !empty($misc_data['others']['waybill_description'])) {
-                    $desc = trim($misc_data['others']['waybill_description']);
-                    if ($desc && !in_array($desc, $waybill_descriptions)) {
-                        $waybill_descriptions[] = $desc;
-                    }
-                }
-            }
 
             $mass_charge = floatval($waybill->mass_charge ?? 0);
             $volume_charge = floatval($waybill->volume_charge ?? 0);
@@ -171,7 +160,8 @@ class Bulk_Invoice_Builder {
 
             $transport_rows[] = [
                 'waybill_no'   => $waybill_no,
-                'charge_type'  => ucfirst($charge_basis) . ' Charge',
+                // Mel (2026-08-05): generic transport label only — no goods description.
+                'charge_type'  => 'Transport - ' . ucfirst($charge_basis) . ' Charge',
                 'quantity'     => $charge_quantity,
                 'unit'         => $charge_unit,
                 'unit_rate'    => $charge_rate,
@@ -180,6 +170,9 @@ class Bulk_Invoice_Builder {
             ];
 
             if (!empty($quotation->items) && is_array($quotation->items)) {
+                $waybill_vat_included = class_exists('KIT_Waybills')
+                    && (KIT_Waybills::normalize_flag_int($waybill->vat_include ?? 0) === 1);
+                if ($waybill_vat_included) {
                 foreach ($quotation->items as $item) {
                     $item_name = $item['item_name'] ?? '';
                     $qty = intval($item['quantity'] ?? 0);
@@ -192,6 +185,7 @@ class Bulk_Invoice_Builder {
                     }
                     $aggregated_items[$item_name]['qty'] += $qty;
                     $aggregated_items[$item_name]['subtotal'] += $qty * $unit_price;
+                }
                 }
             }
 
@@ -239,7 +233,7 @@ class Bulk_Invoice_Builder {
                         }
                         $sadc_count++;
                     }
-                    if (empty($waybill->vat_include) || intval($waybill->vat_include ?? 0) === 0) {
+                    if (KIT_Waybills::normalize_flag_int($waybill->vat_include ?? 0) === 0) {
                         $amt = 0.0;
                         if (isset($misc_data['others']['international_price_rands'])) {
                             $amt = floatval($misc_data['others']['international_price_rands']);
@@ -312,20 +306,24 @@ class Bulk_Invoice_Builder {
             ];
         }
 
+        // Fee total only — itemised parcel names/values stay off the invoice
+        // (Mel, 2026-08-05). Declared values were never part of grand_total.
         $border_clearing_rows = [];
         $border_clearing_total = 0.0;
         foreach ($aggregated_items as $item_name => $data) {
             $line_subtotal = $data['subtotal'];
-            $total_qty = $data['qty'];
-            $effective_unit_price = $total_qty > 0 ? $line_subtotal / $total_qty : 0;
-            $fee_amount = $line_subtotal * 0.10;
+            $fee_amount = class_exists('KIT_Waybills')
+                ? KIT_Waybills::vatCharge($line_subtotal)
+                : $line_subtotal * 0.10;
             $border_clearing_total += $fee_amount;
+        }
+        if ($border_clearing_total > 0) {
             $border_clearing_rows[] = [
-                'item_name'           => $item_name,
-                'qty'                 => $total_qty,
-                'effective_unit_price'=> $effective_unit_price,
-                'line_subtotal'       => $line_subtotal,
-                'fee_amount'          => $fee_amount,
+                'item_name'            => 'Border Clearing Fee (10% of declared value)',
+                'qty'                  => 1,
+                'effective_unit_price' => $border_clearing_total,
+                'line_subtotal'        => $border_clearing_total,
+                'fee_amount'           => $border_clearing_total,
             ];
         }
 
@@ -340,7 +338,6 @@ class Bulk_Invoice_Builder {
             'delivery_id'         => $delivery_id,
             'waybill_count'       => count($waybill_numbers),
             'waybill_numbers'     => $waybill_numbers,
-            'waybill_descriptions'=> $waybill_descriptions,
             'total_mass'          => $total_mass,
             'total_volume'        => $total_volume,
             'transport_rows'     => $transport_rows,

@@ -22,15 +22,186 @@ class Database
             city_id INT UNSIGNED NULL,
             vat_number VARCHAR(50) NULL,
             address TEXT NULL,
-            company_name VARCHAR(255) NULL,
+            company_id MEDIUMINT(10) UNSIGNED NULL DEFAULT NULL,
             created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
             PRIMARY KEY (id),
-            UNIQUE KEY cust_id (cust_id)
+            UNIQUE KEY cust_id (cust_id),
+            KEY idx_customer_company_id (company_id)
         ) $charset_collate;";
 
         require_once(ABSPATH . 'wp-admin/includes/upgrade.php');
         dbDelta($sql);
     }
+
+    /**
+     * Company customers (businesses) — separate from individual kit_customers.
+     */
+    public static function create_company_customers_table()
+    {
+        global $wpdb;
+        $table_name = $wpdb->prefix . 'kit_company_customers';
+        $charset_collate = $wpdb->get_charset_collate();
+
+        $sql = "CREATE TABLE $table_name (
+            id INT UNSIGNED NOT NULL AUTO_INCREMENT,
+            company_id MEDIUMINT(10) UNSIGNED NOT NULL,
+            company_name VARCHAR(255) NOT NULL,
+            cell VARCHAR(20) NULL,
+            telephone VARCHAR(20) NULL,
+            email_address VARCHAR(255) NULL,
+            country_id INT UNSIGNED NULL,
+            city_id INT UNSIGNED NULL,
+            vat_number VARCHAR(50) NULL,
+            address TEXT NULL,
+            created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+            PRIMARY KEY (id),
+            UNIQUE KEY company_id (company_id),
+            KEY company_name (company_name)
+        ) $charset_collate;";
+
+        require_once(ABSPATH . 'wp-admin/includes/upgrade.php');
+        dbDelta($sql);
+    }
+
+    /**
+     * Person → company link: kit_customers.company_id → kit_company_customers.company_id.
+     */
+    public static function ensure_customer_company_id_column(): void
+    {
+        global $wpdb;
+        $table_name = $wpdb->prefix . 'kit_customers';
+
+        $table_exists = $wpdb->get_var($wpdb->prepare(
+            "SELECT COUNT(*) FROM information_schema.tables WHERE table_schema = %s AND table_name = %s",
+            DB_NAME,
+            $table_name
+        ));
+        if ((int) $table_exists === 0) {
+            return;
+        }
+
+        $col_exists = $wpdb->get_var($wpdb->prepare(
+            "SELECT COUNT(*) FROM information_schema.columns
+             WHERE table_schema = %s AND table_name = %s AND column_name = 'company_id'",
+            DB_NAME,
+            $table_name
+        ));
+        if ((int) $col_exists > 0) {
+            return;
+        }
+
+        $wpdb->query(
+            "ALTER TABLE {$table_name}
+             ADD COLUMN company_id MEDIUMINT(10) UNSIGNED NULL DEFAULT NULL,
+             ADD INDEX idx_customer_company_id (company_id)"
+        );
+    }
+
+    /** @var bool|null */
+    private static $customers_have_company_name_column = null;
+
+    public static function customers_have_company_name_column(): bool
+    {
+        global $wpdb;
+        if (self::$customers_have_company_name_column !== null) {
+            return self::$customers_have_company_name_column;
+        }
+        self::$customers_have_company_name_column = (bool) $wpdb->get_var($wpdb->prepare(
+            "SELECT COUNT(*) FROM information_schema.columns
+             WHERE table_schema = %s AND table_name = %s AND column_name = 'company_name'",
+            DB_NAME,
+            $wpdb->prefix . 'kit_customers'
+        ));
+        return self::$customers_have_company_name_column;
+    }
+
+    /**
+     * Drop kit_customers.company_name after backfilling company_id from leftover labels.
+     * Company names live on kit_company_customers only.
+     */
+    public static function drop_customer_company_name_column(): void
+    {
+        global $wpdb;
+        $table_name = $wpdb->prefix . 'kit_customers';
+
+        $table_exists = $wpdb->get_var($wpdb->prepare(
+            "SELECT COUNT(*) FROM information_schema.tables WHERE table_schema = %s AND table_name = %s",
+            DB_NAME,
+            $table_name
+        ));
+        if ((int) $table_exists === 0 || !self::customers_have_company_name_column()) {
+            return;
+        }
+
+        $file = dirname(__FILE__) . '/customers/company-customers-functions.php';
+        if (file_exists($file)) {
+            require_once $file;
+        }
+        if (class_exists('KIT_Company_Customers')) {
+            $rows = $wpdb->get_results(
+                "SELECT cust_id, company_name, company_id FROM {$table_name}
+                 WHERE TRIM(IFNULL(company_name,'')) != ''",
+                ARRAY_A
+            ) ?: [];
+            foreach ($rows as $row) {
+                $label = trim((string) ($row['company_name'] ?? ''));
+                if ($label === '' || KIT_Company_Customers::is_placeholder_company($label)) {
+                    continue;
+                }
+                $cid = (int) ($row['company_id'] ?? 0);
+                if ($cid <= 0) {
+                    $cid = (int) KIT_Company_Customers::ensure_company($label);
+                }
+                if ($cid > 0 && (int) ($row['company_id'] ?? 0) !== $cid) {
+                    $wpdb->update(
+                        $table_name,
+                        ['company_id' => $cid],
+                        ['cust_id' => (int) $row['cust_id']],
+                        ['%d'],
+                        ['%d']
+                    );
+                }
+            }
+        }
+
+        $wpdb->query("ALTER TABLE {$table_name} DROP COLUMN company_name");
+        self::$customers_have_company_name_column = false;
+    }
+
+    /**
+     * Add nullable company_id on kit_waybills (company party FK).
+     */
+    public static function ensure_waybill_company_id_column()
+    {
+        global $wpdb;
+        $table_name = $wpdb->prefix . 'kit_waybills';
+
+        $table_exists = $wpdb->get_var($wpdb->prepare(
+            "SELECT COUNT(*) FROM information_schema.tables WHERE table_schema = %s AND table_name = %s",
+            DB_NAME,
+            $table_name
+        ));
+        if ((int) $table_exists === 0) {
+            return;
+        }
+
+        $col_exists = $wpdb->get_var($wpdb->prepare(
+            "SELECT COUNT(*) FROM information_schema.columns
+             WHERE table_schema = %s AND table_name = %s AND column_name = 'company_id'",
+            DB_NAME,
+            $table_name
+        ));
+        if ((int) $col_exists > 0) {
+            return;
+        }
+
+        $wpdb->query(
+            "ALTER TABLE {$table_name}
+             ADD COLUMN company_id MEDIUMINT(10) UNSIGNED NULL DEFAULT NULL AFTER customer_id,
+             ADD INDEX idx_company_id (company_id)"
+        );
+    }
+
     public static function create_services_table()
     {
         global $wpdb;
@@ -46,6 +217,10 @@ class Database
         ) $charset_collate;";
         require_once(ABSPATH . 'wp-admin/includes/upgrade.php');
         dbDelta($sql);
+
+        if (function_exists('kit_seed_default_services')) {
+            kit_seed_default_services();
+        }
     }
 
     public static function create_deliveries_table()
@@ -150,7 +325,8 @@ class Database
         direction_id INT UNSIGNED NOT NULL,
         city_id INT UNSIGNED NULL,
         delivery_id INT UNSIGNED NOT NULL,
-        customer_id MEDIUMINT(10) UNSIGNED NOT NULL,
+        customer_id MEDIUMINT(10) UNSIGNED NOT NULL DEFAULT 0,
+        company_id MEDIUMINT(10) UNSIGNED NULL DEFAULT NULL,
         approval ENUM('approved','pending','cancelled', 'rejected', 'completed') DEFAULT 'pending',
         approval_userid INT UNSIGNED NULL,
         waybill_no VARCHAR(20) NOT NULL,
@@ -180,13 +356,14 @@ class Database
         qr_code_data LONGTEXT NULL,
         created_by BIGINT UNSIGNED NOT NULL,
         last_updated_by BIGINT UNSIGNED NOT NULL,
-        status ENUM('pending', 'quoted', 'paid', 'assigned', 'shipped', 'delivered', 'completed', 'invoiced', 'rejected') DEFAULT 'pending',
+        status ENUM('pending', 'quoted', 'paid', 'assigned', 'scheduled', 'unconfirmed', 'in_transit', 'shipped', 'delivered', 'completed', 'invoiced', 'rejected') DEFAULT 'pending',
         status_userid BIGINT UNSIGNED DEFAULT 0,
         created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
         last_updated_at DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
         PRIMARY KEY (id),
         INDEX (status),
         INDEX (customer_id),
+        INDEX idx_company_id (company_id),
         INDEX idx_parcel_id (parcel_id),
         UNIQUE KEY waybill_no (waybill_no),
         UNIQUE KEY product_invoice_number (product_invoice_number)
@@ -196,6 +373,115 @@ class Database
         dbDelta($sql);
     }
 
+
+    /**
+     * Extend kit_waybills.status ENUM with delivery-aligned logistics values.
+     */
+    public static function ensure_waybill_logistics_status_values()
+    {
+        global $wpdb;
+        $table_name = $wpdb->prefix . 'kit_waybills';
+
+        $table_exists = $wpdb->get_var($wpdb->prepare(
+            "SELECT COUNT(*) FROM information_schema.tables WHERE table_schema = %s AND table_name = %s",
+            DB_NAME,
+            $table_name
+        ));
+        if ((int) $table_exists === 0) {
+            return;
+        }
+
+        $column_type = $wpdb->get_var($wpdb->prepare(
+            "SELECT COLUMN_TYPE FROM INFORMATION_SCHEMA.COLUMNS
+             WHERE TABLE_SCHEMA = %s AND TABLE_NAME = %s AND COLUMN_NAME = 'status'",
+            DB_NAME,
+            $table_name
+        ));
+
+        if (! is_string($column_type) || strpos($column_type, 'scheduled') !== false) {
+            return;
+        }
+
+        $wpdb->query(
+            "ALTER TABLE {$table_name} MODIFY COLUMN status
+             ENUM('pending', 'quoted', 'paid', 'assigned', 'scheduled', 'unconfirmed', 'in_transit', 'shipped', 'delivered', 'completed', 'invoiced', 'rejected')
+             DEFAULT 'pending'"
+        );
+    }
+
+    /**
+     * Widen kit_waybills.total_volume so the sheet's real precision survives.
+     *
+     * The Google Sheet is the source of truth (client ruling, 2026-08-05).
+     * total_volume was DECIMAL(10,2), but volumes are cubic metres — the sheet
+     * carries values like 0.08649 and 46.99898103. On the live data 1054 of
+     * 1132 rows lost precision on write, and 0.08649 was being stored as 0.09.
+     *
+     * That is not cosmetic: volume_charge is volume x rate, so a volume rounded
+     * to 2dp produces a wrong charge, which is why sheet and DB charges diverge.
+     *
+     * DECIMAL(16,8) keeps 8 decimals — the most the live sheet actually uses —
+     * and widening is lossless for the values already stored.
+     */
+    /**
+     * Widen kit_waybills numeric columns so the sheet's real precision survives.
+     *
+     * The Google Sheet is the source of truth (client ruling, 2026-08-05). These
+     * columns were DECIMAL(10,2), but volumes are cubic metres and the sheet
+     * carries values like 0.08649 and 46.99898103. On the live data 1054 of 1132
+     * rows lost precision on write, and 0.08649 was stored as 0.09.
+     *
+     * That is not cosmetic: volume_charge is volume x rate, so a volume rounded
+     * to 2dp produces a wrong charge — which is exactly why sheet and DB charges
+     * diverged.
+     *
+     * Each column is checked and altered independently. An earlier version gated
+     * every ALTER on total_volume alone, so once that one column was widened the
+     * others were skipped forever and stayed at DECIMAL(10,2).
+     *
+     * Widening is lossless for values already stored.
+     */
+    public static function ensure_waybill_volume_precision()
+    {
+        global $wpdb;
+        $table_name = $wpdb->prefix . 'kit_waybills';
+
+        // The CURRENT connection's database, not the DB_NAME constant — a
+        // migration that inspects one database while altering another silently
+        // does nothing.
+        $schema = $wpdb->dbname ?: DB_NAME;
+
+        $table_exists = $wpdb->get_var($wpdb->prepare(
+            "SELECT COUNT(*) FROM information_schema.tables WHERE table_schema = %s AND table_name = %s",
+            $schema,
+            $table_name
+        ));
+        if ((int) $table_exists === 0) {
+            return;
+        }
+
+        $targets = [
+            'total_volume'  => 'DECIMAL(16,8) NULL',
+            'volume_charge' => 'DECIMAL(16,8) NULL',
+            'mass_charge'   => 'DECIMAL(16,8) NULL',
+            'sad500_amount' => 'DECIMAL(16,8) NULL DEFAULT 0',
+            'sadc_amount'   => 'DECIMAL(16,8) NULL DEFAULT 0',
+        ];
+
+        foreach ($targets as $column => $definition) {
+            $current = $wpdb->get_var($wpdb->prepare(
+                "SELECT COLUMN_TYPE FROM INFORMATION_SCHEMA.COLUMNS
+                 WHERE TABLE_SCHEMA = %s AND TABLE_NAME = %s AND COLUMN_NAME = %s",
+                $schema,
+                $table_name,
+                $column
+            ));
+            if (!is_string($current) || strpos($current, '16,8') !== false) {
+                continue;
+            }
+            $wpdb->query("ALTER TABLE {$table_name} MODIFY COLUMN `{$column}` {$definition}");
+        }
+    }
 
     /**
      * Ensure qr_code_data column can store large JSON strings
@@ -315,6 +601,40 @@ class Database
         require_once(ABSPATH . 'wp-admin/includes/upgrade.php');
         dbDelta($sql);
     }
+
+    public static function create_booking_requests_table()
+    {
+        global $wpdb;
+        $table_name = $wpdb->prefix . 'kit_booking_requests';
+        $charset_collate = $wpdb->get_charset_collate();
+
+        $sql = "CREATE TABLE $table_name (
+            id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+            customer_id MEDIUMINT(10) UNSIGNED NOT NULL,
+            origin_country_id INT UNSIGNED NULL,
+            origin_city_id INT UNSIGNED NULL,
+            destination_country_id INT UNSIGNED NULL,
+            destination_city_id INT UNSIGNED NULL,
+            parcel_count INT UNSIGNED DEFAULT 1,
+            weight_kg DECIMAL(10,2) NULL,
+            length_cm DECIMAL(10,2) NULL,
+            width_cm DECIMAL(10,2) NULL,
+            height_cm DECIMAL(10,2) NULL,
+            service_note VARCHAR(255) NULL,
+            notes TEXT,
+            status VARCHAR(20) DEFAULT 'pending',
+            waybill_id INT UNSIGNED NULL,
+            created_by BIGINT UNSIGNED NULL,
+            created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+            last_updated_at DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+            PRIMARY KEY (id),
+            INDEX customer_id (customer_id),
+            INDEX status (status)
+        ) $charset_collate;";
+        require_once ABSPATH . 'wp-admin/includes/upgrade.php';
+        dbDelta($sql);
+    }
+
     public static function create_operating_countries_table()
     {
         global $wpdb;
@@ -398,7 +718,7 @@ class Database
 
         $cities = [
             'ZA' => ['Johannesburg', 'Cape Town', 'Durban', 'Pretoria', 'Port Elizabeth'],
-            'TZ' => ['Dar es Salaam', 'Dodoma', 'Arusha', 'Mbeya', 'Mwanza', 'Iringa', 'Kilombero', 'Mafinga', 'Makambako', 'Mfundi', 'Mikumi', 'Morogoro', 'Moshi', 'Sao Hill', 'Sumbawanga', 'Tanga', 'Zanzibar', 'Gombe Kinshasa'],
+            'TZ' => ['Dar es Salaam', 'Dodoma', 'Arusha', 'Mbeya', 'Mwanza', 'Iringa', 'Kilombero', 'Mafinga', 'Makambako', 'Masifio', 'Mfundi', 'Mikumi', 'Morogoro', 'Moshi', 'Pemba', 'Sao Hill', 'Sumbawanga', 'Tanga', 'Zanzibar', 'Gombe Kinshasa'],
             'BW' => ['Gaborone', 'Francistown', 'Maun', 'Molepolole', 'Serowe'],
             'ZW' => ['Harare', 'Bulawayo', 'Mutare', 'Gweru', 'Kwekwe'],
             'MZ' => ['Maputo', 'Matola', 'Beira', 'Nampula', 'Chimoio'],
@@ -712,17 +1032,21 @@ class Database
         require_once(ABSPATH . 'wp-admin/includes/upgrade.php');
         dbDelta($sql);
 
-        // Ensure there is at least one row
+        // Ensure there is at least one row (seed defaults only when empty — do not overwrite edits)
         $exists = $wpdb->get_var("SELECT COUNT(*) FROM $table_name");
         if (!$exists) {
             $company_name = get_bloginfo('name');
             // Ensure we have a valid string value, not null
             if (empty($company_name) || $company_name === null) {
-                $company_name = 'KAYISE IT'; // Default fallback
+                $company_name = '08600 Africa';
             }
-            $wpdb->insert($table_name, [
-                'company_name' => $company_name
-            ]);
+            $insert = [
+                'company_name' => $company_name,
+            ];
+            if (class_exists('KIT_Company')) {
+                $insert = array_merge($insert, KIT_Company::hardcoded_identity());
+            }
+            $wpdb->insert($table_name, $insert);
         }
     }
 
@@ -841,6 +1165,8 @@ class Database
     {
         self::drop_legacy_foreign_keys();
         self::create_customers_table();
+        self::create_company_customers_table();
+        self::ensure_customer_company_id_column();
         self::create_services_table();
         self::create_operating_countries_table();
         self::create_operating_cities_table();
@@ -856,16 +1182,81 @@ class Database
         // Create company_details table
         self::create_company_details_table();
         self::create_waybills_table();
+        self::ensure_waybill_company_id_column();
         self::ensure_qr_code_data_longtext();
-        
-        // Create parcels table (replaces consolidated waybills)
-        self::create_parcels_table();
-        
+        self::ensure_waybill_logistics_status_values();
+        self::ensure_waybill_volume_precision();
+
         self::create_waybill_items_table();
         self::add_product_invoice_number_unique(); // Ensure unique constraint exists
         self::create_quotations_table();
+        self::create_booking_requests_table();
         self::create_invoices_table();
         self::create_discounts_table();
+        if (class_exists('KIT_Bulk_Action_Log')) {
+            KIT_Bulk_Action_Log::ensure_table();
+        }
+        self::maybe_repair_waybill_vat_flags();
+        self::maybe_migrate_company_customers();
+        self::drop_customer_company_name_column();
+        self::maybe_backfill_waybill_company_ids();
+    }
+
+    /**
+     * One-time split of business rows out of kit_customers into kit_company_customers.
+     */
+    public static function maybe_migrate_company_customers(): void
+    {
+        if (get_option('kit_company_customers_migrated_v1')) {
+            return;
+        }
+        $file = dirname(__FILE__) . '/customers/company-customers-functions.php';
+        if (file_exists($file)) {
+            require_once $file;
+        }
+        if (class_exists('KIT_Company_Customers') && method_exists('KIT_Company_Customers', 'migrate_from_kit_customers')) {
+            KIT_Company_Customers::migrate_from_kit_customers();
+            update_option('kit_company_customers_migrated_v1', 1, false);
+        }
+    }
+
+    /**
+     * One-time: set kit_waybills.company_id from sheet customer_id ↔ company_id.
+     */
+    public static function maybe_backfill_waybill_company_ids(): void
+    {
+        if (get_option('kit_waybill_company_id_backfill_v1')) {
+            return;
+        }
+        $file = dirname(__FILE__) . '/customers/company-customers-functions.php';
+        if (file_exists($file)) {
+            require_once $file;
+        }
+        if (class_exists('KIT_Company_Customers') && method_exists('KIT_Company_Customers', 'backfill_waybill_company_ids')) {
+            KIT_Company_Customers::backfill_waybill_company_ids();
+            update_option('kit_waybill_company_id_backfill_v1', 1, false);
+        }
+    }
+
+    /**
+     * Normalize legacy vat_include values and stale border_clearing_total (runs once).
+     */
+    public static function maybe_repair_waybill_vat_flags(): void
+    {
+        if (get_option('kit_waybill_vat_repair_v1')) {
+            return;
+        }
+        if (!class_exists('KIT_Waybills') || !method_exists('KIT_Waybills', 'repair_waybill_vat_flags')) {
+            $waybills_file = dirname(__FILE__) . '/waybill/waybill-functions.php';
+            if (file_exists($waybills_file)) {
+                require_once $waybills_file;
+            }
+        }
+        if (!class_exists('KIT_Waybills') || !method_exists('KIT_Waybills', 'repair_waybill_vat_flags')) {
+            return;
+        }
+        KIT_Waybills::repair_waybill_vat_flags();
+        update_option('kit_waybill_vat_repair_v1', 1, false);
     }
     
     /**
@@ -907,41 +1298,6 @@ class Database
         }
     }
 
-    /**
-     * Create parcels table
-     * Parcels contain multiple waybills (like consolidated waybills, but simpler concept)
-     */
-    public static function create_parcels_table()
-    {
-        global $wpdb;
-        $table_name = $wpdb->prefix . 'kit_parcels';
-        $charset_collate = $wpdb->get_charset_collate();
-
-        $sql = "CREATE TABLE $table_name (
-            id INT UNSIGNED NOT NULL AUTO_INCREMENT,
-            parcel_no VARCHAR(20) NOT NULL,
-            description TEXT NULL,
-            customer_id MEDIUMINT(10) UNSIGNED NOT NULL,
-            total_waybills INT UNSIGNED DEFAULT 0,
-            total_amount DECIMAL(10,2) DEFAULT 0.00,
-            status ENUM('pending', 'quoted', 'paid', 'assigned', 'shipped', 'delivered', 'completed', 'invoiced', 'rejected') DEFAULT 'pending',
-            warehouse BOOLEAN DEFAULT FALSE,
-            created_by BIGINT UNSIGNED NOT NULL,
-            last_updated_by BIGINT UNSIGNED NOT NULL,
-            created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-            last_updated_at DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
-            PRIMARY KEY (id),
-            UNIQUE KEY parcel_no (parcel_no),
-            INDEX idx_customer_id (customer_id),
-            INDEX idx_status (status),
-            INDEX idx_warehouse (warehouse),
-            INDEX idx_created_at (created_at)
-        ) $charset_collate;";
-
-        require_once(ABSPATH . 'wp-admin/includes/upgrade.php');
-        dbDelta($sql);
-    }
-
     public static function deactivate()
     {
         global $wpdb;
@@ -973,6 +1329,11 @@ class Database
                 $dropped_tables[] = 'kit_quotations';
             } else {
                 $failed_tables[] = 'kit_quotations';
+            }
+            if (self::delete_table('kit_booking_requests')) {
+                $dropped_tables[] = 'kit_booking_requests';
+            } else {
+                $failed_tables[] = 'kit_booking_requests';
             }
             if (self::delete_table('kit_invoices')) {
                 $dropped_tables[] = 'kit_invoices';
@@ -1045,6 +1406,11 @@ class Database
             }
 
             // 9) Drop remaining base tables
+            if (self::delete_table('kit_company_customers')) {
+                $dropped_tables[] = 'kit_company_customers';
+            } else {
+                $failed_tables[] = 'kit_company_customers';
+            }
             if (self::delete_table('kit_customers')) {
                 $dropped_tables[] = 'kit_customers';
             } else {

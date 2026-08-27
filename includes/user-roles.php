@@ -79,6 +79,15 @@ class KIT_User_Roles {
             'kit_view_waybill_details' => true, // Allow viewing waybill details
         ));
         
+        // Frontend customer portal only (distinct slug — do not use `customer`; see remove_unwanted_roles)
+        if (!get_role('08600_portal_customer')) {
+            add_role('08600_portal_customer', '08600 Customer', array(
+                'read' => true,
+                'kit_access_customer_portal' => true,
+                'kit_submit_booking_request' => true,
+            ));
+        }
+
         // Manager Role - Can approve and invoice but cannot see prices
         add_role('manager', 'Manager', array(
             'read' => true,
@@ -138,6 +147,7 @@ class KIT_User_Roles {
                 $admin_role->add_cap('kit_access_settings');
                 $admin_role->add_cap('kit_edit_waybills'); // Allow editing waybills
                 $admin_role->add_cap('kit_view_waybill_details'); // Allow viewing waybill details
+                $admin_role->add_cap('kit_access_customer_portal'); // Impersonate / test portal; PDF checks
             }
         }
 
@@ -157,6 +167,13 @@ class KIT_User_Roles {
             $dc_role->add_cap('kit_view_waybill_details'); // Allow viewing waybill details
             // Explicitly ensure no price access
             $dc_role->remove_cap('kit_can_see_prices');
+        }
+
+        // Ensure portal customer role exists and has cap (handles existing sites / upgrades)
+        $portal_role = get_role('08600_portal_customer');
+        if ($portal_role) {
+            $portal_role->add_cap('kit_access_customer_portal');
+            $portal_role->add_cap('kit_submit_booking_request');
         }
 
         // Ensure Manager role has required caps (handles existing sites)
@@ -330,6 +347,54 @@ class KIT_User_Roles {
             return false;
         }
         return in_array('administrator', $roles) || in_array('manager', $roles) || current_user_can('manage_options');
+    }
+
+    /**
+     * Whether the user is the frontend-only customer portal role.
+     *
+     * @param WP_User|null $user Optional user; default current user.
+     * @return bool
+     */
+    public static function is_portal_customer($user = null) {
+        $user = $user instanceof WP_User ? $user : wp_get_current_user();
+        if (!$user || !$user->exists()) {
+            return false;
+        }
+        return in_array('08600_portal_customer', (array) $user->roles, true);
+    }
+
+    /**
+     * Customer portal capability (linked kit_customer_id required for data access).
+     *
+     * @param WP_User|int|null $user User object, user ID, or null for current user.
+     * @return bool
+     */
+    public static function can_access_customer_portal($user = null) {
+        if ($user === null) {
+            return current_user_can('kit_access_customer_portal');
+        }
+        if (is_numeric($user)) {
+            return user_can((int) $user, 'kit_access_customer_portal');
+        }
+        if ($user instanceof WP_User) {
+            return $user->exists() && user_can($user, 'kit_access_customer_portal');
+        }
+        return false;
+    }
+
+    /**
+     * Linked kit_customers.cust_id for portal users (usermeta).
+     *
+     * @param int|null $user_id WordPress user ID; default current user.
+     * @return int Positive cust_id or 0 if unset/invalid.
+     */
+    public static function get_portal_customer_id($user_id = null) {
+        $uid = $user_id !== null ? (int) $user_id : get_current_user_id();
+        if ($uid <= 0) {
+            return 0;
+        }
+        $id = (int) get_user_meta($uid, 'kit_customer_id', true);
+        return $id > 0 ? $id : 0;
     }
 
     /**

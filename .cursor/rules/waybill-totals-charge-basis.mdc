@@ -1,0 +1,61 @@
+---
+description: Single source of truth for waybill freight totals, charge_basis, and DB-first debugging
+alwaysApply: true
+---
+
+# Waybill Totals / Charge Basis
+
+## Canonical code
+
+Use `kit_seed_normalize_charge_basis()` + `kit_seed_total_from_charge_basis()` in
+`includes/sync/kit-charge-basis.php`. Do not reimplement mass/volume/max inline in
+seed, PDF, JS, list, or verification — call or port that helper.
+
+## Freight total rules
+
+1. Sheet/DB columns: Z `mass_charge`, AA `volume_charge`, AB `charge_basis`.
+2. `charge_basis` = mass/weight → billed freight = `mass_charge`.
+3. `charge_basis` = volume → billed freight = `volume_charge`.
+4. `charge_basis` empty / auto / max / higher / best → billed freight =
+   `max(mass_charge, volume_charge)`.
+5. Never default empty basis to `MASS` or `VOLUME` on seed/upsert — leave empty
+   so rule 4 applies.
+6. Rules 1–5 give **freight only**, not the billed total.
+7. Sheet `product_invoice_amount` = parcels total → `waybill_items_total`.
+
+## Billed total (`product_invoice_amount`)
+
+DB `product_invoice_amount` is the **billed total**: freight (rules above) + VAT +
+misc + SAD500/SADC. It is what List/UI Total / Cost shows.
+
+1. Only `KIT_Bulletproof_Calculator::calculate_waybill_total()` produces it, reached
+   via `KIT_Waybills::doubleCalcWaybillTotal()`. Never assemble the total by hand.
+2. `vat_include` = true → VAT (10% of `waybill_items_total`) is part of the total.
+   Freight alone is the wrong figure; that bug left 744 live waybills short by
+   R 1.25m.
+3. Never seed/write `product_invoice_amount` from a sheet cell or from freight
+   alone. The sheet has no VAT-inclusive column — VAT is added by us. Every seed
+   path derives it after writing the charge columns and line items.
+4. Verification must not assert `product_invoice_amount` == basis freight. Verify
+   `mass_charge` / `volume_charge` / `charge_basis` (sheet-owned) instead.
+
+## Debug first (DB before code)
+
+Before changing display/PDF/seed for a wrong total, read DB `mass_charge`,
+`volume_charge`, `charge_basis`, `product_invoice_amount`. If the UI matches the
+DB, the issue is data (or upstream seed), not the renderer.
+
+If basis is set to the zero side while the other charge has money, that is
+data/mapping — not a missing max fallback.
+
+## Google Sheet seed — customer display
+
+Treat seeded `No Customer Data` as a mapping/join bug first, not missing sheet
+data, unless the sheet row itself has no customer fields.
+
+## Example
+
+```text
+Bad:  basis=MASS, mass=0, volume=38704 → Total R 0.00 (rules working; wrong basis)
+Good: basis empty → Total 38704; or basis=VOLUME when only volume has charge
+```

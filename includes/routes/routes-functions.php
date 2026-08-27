@@ -9,33 +9,18 @@ class KIT_Routes
 {
     public static function init()
     {
-        // Register admin menu
-        // Removed duplicate menu registration - Routes is now handled in admin-menu.php
-        // add_action('admin_menu', [self::class, 'register_admin_menu']);
+        // Removed duplicate admin_menu registration — routes menu lives in admin-menu.php
+        // Route management is staff-only, so no nopriv variants are registered.
+        // delete_route / update_route / get_route / get_route_by_name / get_route_by_description
+        // were registered without ever being implemented — calling them fataled.
         add_action('admin_post_create_route', [self::class, 'create_route']);
         add_action('wp_ajax_create_route', [self::class, 'create_route']);
-        add_action('wp_ajax_nopriv_create_route', [self::class, 'create_route']);
-        add_action('wp_ajax_delete_route', [self::class, 'delete_route']);
-        add_action('wp_ajax_nopriv_delete_route', [self::class, 'delete_route']);
-        add_action('wp_ajax_update_route', [self::class, 'update_route']);
-        add_action('wp_ajax_nopriv_update_route', [self::class, 'update_route']);
-        add_action('wp_ajax_get_route', [self::class, 'get_route']);
-        add_action('wp_ajax_nopriv_get_route', [self::class, 'get_route']);
-        add_action('wp_ajax_get_routes', [self::class, 'get_routes']);
-        add_action('wp_ajax_nopriv_get_routes', [self::class, 'get_routes']);
-        add_action('wp_ajax_get_route_by_id', [self::class, 'get_route_by_id']);
-        add_action('wp_ajax_nopriv_get_route_by_id', [self::class, 'get_route_by_id']);
-        add_action('wp_ajax_get_route_by_name', [self::class, 'get_route_by_name']);
-        add_action('wp_ajax_nopriv_get_route_by_name', [self::class, 'get_route_by_name']);
-        add_action('wp_ajax_get_route_by_description', [self::class, 'get_route_by_description']);
         // DataTables server-side endpoint for routes
         add_action('wp_ajax_routes_datatable', [self::class, 'routes_datatable']);
         // Export waybills CSV
         add_action('admin_post_kit_export_waybills_csv', [self::class, 'export_waybills_csv']);
         // Route status toggle
         add_action('wp_ajax_toggle_route_status', [self::class, 'handle_toggle_route_status']);
-        // Register AJAX handlers here as needed
-        // add_action('wp_ajax_...', [self::class, 'ajax_handler']);
     }
 
     public static function get_country_name_by_id($country_id)
@@ -52,6 +37,133 @@ class KIT_Routes
         $table = $wpdb->prefix . 'kit_operating_cities';
         $city_name = $wpdb->get_var($wpdb->prepare("SELECT city_name FROM $table WHERE id = %d", $city_id));
         return $city_name;
+    }
+
+    /**
+     * Primary operating city for a country (e.g. Johannesburg for SA, Dar es Salaam for TZ).
+     */
+    public static function get_default_city_id_for_country(int $country_id): int
+    {
+        if ($country_id <= 0) {
+            return 1;
+        }
+
+        static $cache = [];
+        if (isset($cache[$country_id])) {
+            return $cache[$country_id];
+        }
+
+        global $wpdb;
+        $city_id = (int) $wpdb->get_var($wpdb->prepare(
+            "SELECT id FROM {$wpdb->prefix}kit_operating_cities WHERE country_id = %d ORDER BY id ASC LIMIT 1",
+            $country_id
+        ));
+
+        $cache[$country_id] = $city_id > 0 ? $city_id : 1;
+
+        return $cache[$country_id];
+    }
+
+    public static function get_direction_destination_country_id(int $direction_id): int
+    {
+        if ($direction_id <= 0) {
+            return 0;
+        }
+
+        global $wpdb;
+
+        return (int) $wpdb->get_var($wpdb->prepare(
+            "SELECT destination_country_id FROM {$wpdb->prefix}kit_shipping_directions WHERE id = %d LIMIT 1",
+            $direction_id
+        ));
+    }
+
+    public static function city_belongs_to_country(int $city_id, int $country_id): bool
+    {
+        if ($city_id <= 0 || $country_id <= 0) {
+            return false;
+        }
+
+        global $wpdb;
+        $city_country_id = (int) $wpdb->get_var($wpdb->prepare(
+            "SELECT country_id FROM {$wpdb->prefix}kit_operating_cities WHERE id = %d LIMIT 1",
+            $city_id
+        ));
+
+        return $city_country_id === $country_id;
+    }
+
+    /**
+     * Ensure a delivery destination city matches the route's destination country.
+     * Falls back to that country's default city when missing or mismatched (e.g. JHB on SA→TZ).
+     */
+    public static function resolve_destination_city_id(int $direction_id, int $requested_city_id = 0): int
+    {
+        $dest_country_id = self::get_direction_destination_country_id($direction_id);
+        if ($dest_country_id <= 0) {
+            return max(1, $requested_city_id);
+        }
+
+        $default = self::get_default_city_id_for_country($dest_country_id);
+        if ($requested_city_id > 0 && self::city_belongs_to_country($requested_city_id, $dest_country_id)) {
+            return $requested_city_id;
+        }
+
+        return $default;
+    }
+
+    public static function get_city_country_id(int $city_id): int
+    {
+        if ($city_id <= 0) {
+            return 0;
+        }
+
+        global $wpdb;
+
+        return (int) $wpdb->get_var($wpdb->prepare(
+            "SELECT country_id FROM {$wpdb->prefix}kit_operating_cities WHERE id = %d LIMIT 1",
+            $city_id
+        ));
+    }
+
+    public static function find_direction_id_for_destination_country(int $destination_country_id): int
+    {
+        if ($destination_country_id <= 0) {
+            return 1;
+        }
+
+        global $wpdb;
+        $direction_id = (int) $wpdb->get_var($wpdb->prepare(
+            "SELECT id FROM {$wpdb->prefix}kit_shipping_directions
+             WHERE destination_country_id = %d
+             ORDER BY id ASC LIMIT 1",
+            $destination_country_id
+        ));
+
+        return $direction_id > 0 ? $direction_id : 1;
+    }
+
+    /**
+     * Align kit_deliveries direction + destination city during seed/sync.
+     *
+     * @return array{direction_id:int,destination_city_id:int}
+     */
+    public static function reconcile_delivery_route(int $direction_id, int $destination_city_id): array
+    {
+        $direction_id = max(1, $direction_id);
+        $destination_city_id = self::resolve_destination_city_id($direction_id, $destination_city_id);
+
+        $city_country = self::get_city_country_id($destination_city_id);
+        $dir_dest_country = self::get_direction_destination_country_id($direction_id);
+        if ($city_country > 0 && $dir_dest_country > 0 && $city_country !== $dir_dest_country) {
+            $direction_id = self::find_direction_id_for_destination_country($city_country);
+            $destination_city_id = self::resolve_destination_city_id($direction_id, $destination_city_id);
+        }
+
+        return [
+            'direction_id' => $direction_id,
+            'destination_city_id' => $destination_city_id,
+        ];
     }
 
     public static function get_routes()
@@ -182,6 +294,25 @@ class KIT_Routes
 
     public static function plugin_route_management_page()
     {
+        if (
+            isset($_POST['bulk_action'], $_POST['bulk_ids'], $_POST['bulk_nonce'])
+            && sanitize_text_field(wp_unslash($_POST['bulk_action'])) === 'delete'
+            && wp_verify_nonce(sanitize_text_field(wp_unslash($_POST['bulk_nonce'])), 'bulk_action_nonce')
+        ) {
+            if (!current_user_can('kit_view_waybills')) {
+                wp_die('Unauthorized');
+            }
+            global $wpdb;
+            $table = $wpdb->prefix . 'kit_shipping_directions';
+            $ids = array_filter(array_map('intval', explode(',', sanitize_text_field(wp_unslash($_POST['bulk_ids'])))));
+            foreach ($ids as $rid) {
+                $wpdb->delete($table, ['id' => $rid], ['%d']);
+            }
+            $redirect = wp_get_referer() ?: admin_url('admin.php?page=route-management');
+            wp_safe_redirect(remove_query_arg(['_wp_http_referer'], $redirect));
+            exit;
+        }
+
         // Enqueue DataTables assets for this admin page
         if (function_exists('wp_enqueue_style')) {
             wp_enqueue_style('datatables-css', 'https://cdn.datatables.net/1.13.6/css/jquery.dataTables.min.css', [], '1.13.6');
@@ -277,8 +408,8 @@ class KIT_Routes
                                 'tag' => 'h2'
                             ]) ?> <div style="display: flex; gap: 12px;">
 
-                                <?php echo KIT_Commons::renderButton('Create New', 'primary', 'sm', ['onclick' => 'window.location.href=\'?page=route-create\'', 'gradient' => true]); ?>
-                                <?php echo KIT_Commons::renderButton('Manage Countries', 'secondary', 'sm', ['onclick' => 'window.location.href=\'?page=08600-countries\'', 'gradient' => false]); ?>
+                                <?php echo KIT_Commons::renderButton('Create New', 'primary', 'lg', ['onclick' => 'window.location.href=\'?page=route-create\'', 'gradient' => true]); ?>
+                                <?php echo KIT_Commons::renderButton('Manage Countries', 'secondary', 'lg', ['onclick' => 'window.location.href=\'?page=08600-countries\'', 'gradient' => false]); ?>
                             </div>
                         </div>
 
@@ -291,11 +422,14 @@ class KIT_Routes
                         $routeData = [];
                         foreach ($routes as $route) {
                             $routeData[] = [
+                                'id' => $route->route_id,
                                 'route_id' => $route->route_id,
                                 'origin_country_name' => $route->origin_country_name,
                                 'destination_country_name' => $route->destination_country_name,
                                 'description' => $route->description,
-                                'is_active' => $route->is_active
+                                'is_active' => $route->is_active,
+                                'city' => $route->destination_country_name ?: 'Unassigned City',
+                                'status' => !empty($route->is_active) ? 'active' : 'inactive',
                             ];
                         }
 
@@ -319,7 +453,7 @@ class KIT_Routes
                                     return '
                                     <div class="flex items-center gap-2">
                                         <span class="' . $status_class . '" style="color: ' . $status_color . '; font-weight: 600;">● ' . $status_text . '</span>
-                                        ' . KIT_Commons::renderButton($toggle_text, 'ghost', 'sm', [
+                                        ' . KIT_Commons::renderButton($toggle_text, 'ghost', 'lg', [
                                         'type' => 'button',
                                         'classes' => 'route-toggle-btn text-xs px-2 py-1 rounded border hover:bg-gray-50',
                                         'data-route-id' => $row['route_id'],
@@ -342,14 +476,19 @@ class KIT_Routes
                         ];
 
                         // Render unified table with advanced features
-                        echo KIT_Unified_Table::infinite($routeData, $columns, [
+                        echo KIT_Unified_Table::infinite($routeData, $columns, KIT_Unified_Table::optionsWithManageDefaults([
                             'title' => 'All Routes',
                             'actions' => $actions,
-                            'searchable' => true,
-                            'sortable' => true,
-                            'exportable' => true,
-                            'empty_message' => 'No routes found'
-                        ]);
+                            'bulk_actions_list' => ['delete', 'export'],
+                            'empty_message' => 'No routes found',
+                            'search_placeholder' => 'Search routes...',
+                            'search_filters' => [
+                                ['value' => 'origin_country_name', 'label' => 'Origin', 'placeholder' => 'Search origin...'],
+                                ['value' => 'destination_country_name', 'label' => 'Destination', 'placeholder' => 'Search destination...'],
+                                ['value' => 'description', 'label' => 'Description', 'placeholder' => 'Search description...'],
+                            ],
+                            'search_default_filter' => 'destination_country_name',
+                        ]));
                         ?>
                     </div>
 
@@ -455,7 +594,18 @@ class KIT_Routes
                     <div>
                         <label style="display: block; font-size: 14px; font-weight: 500; color: #374151; margin: 0 0 8px 0;">Origin Country & City</label>
                         <div style="background: #f9fafb; padding: 16px; border-radius: 8px; border: 1px solid #e5e7eb;">
-                            <?php require(COURIER_FINANCE_PLUGIN_PATH . 'includes/components/selectsOrigin.php'); ?>
+                            <?php
+                            $kit_origin_selects = [
+                                'country_name' => 'country_id',
+                                'city_name' => 'city_id',
+                                'route_data' => ($routeData ?? null),
+                                'country_select_options' => [
+                                    'show_all_countries' => true,
+                                    'show_inactive_indicators' => true,
+                                ],
+                            ];
+                            require COURIER_FINANCE_PLUGIN_PATH . 'includes/components/selectsOrigin.php';
+                            ?>
                         </div>
                     </div>
                 </div>
@@ -528,11 +678,14 @@ class KIT_Routes
     public static function get_route_by_id($route_id)
     {
         global $wpdb;
-        $route = $wpdb->get_row("SELECT sd.*, oc.country_name as origin_country_name, dc.country_name as destination_country_name
+        $route = $wpdb->get_row($wpdb->prepare(
+            "SELECT sd.*, oc.country_name as origin_country_name, dc.country_name as destination_country_name
         FROM {$wpdb->prefix}kit_shipping_directions sd
         LEFT JOIN {$wpdb->prefix}kit_operating_countries oc ON sd.origin_country_id = oc.id
         LEFT JOIN {$wpdb->prefix}kit_operating_countries dc ON sd.destination_country_id = dc.id
-        WHERE sd.id = $route_id");
+        WHERE sd.id = %d",
+            (int) $route_id
+        ));
 
         return $route;
     }
@@ -578,7 +731,7 @@ class KIT_Routes
                     <div style="background: white; padding: 24px; border-radius: 12px; box-shadow: 0 1px 3px rgba(0,0,0,0.1); border: 1px solid #e5e7eb;">
                         <div style="display:flex; justify-content: space-between; align-items: center; margin-bottom: 16px;">
                             <div style="display:flex; gap:8px; align-items:center;">
-                                <?php echo KIT_Commons::renderButton('Back to Routes', 'secondary', 'sm', ['type' => 'button', 'onclick' => 'window.location.href=\'?page=route-management\'']); ?>
+                                <?php echo KIT_Commons::renderButton('Back to Routes', 'secondary', 'lg', ['type' => 'button', 'onclick' => 'window.location.href=\'?page=route-management\'']); ?>
                                 <span style="color:#9ca3af;">/</span>
                                 <span style="color:#374151; font-weight:600;"><?php echo $is_edit_mode ? 'Edit' : 'Create'; ?> Route</span>
                             </div>
@@ -747,11 +900,15 @@ class KIT_Routes
             wp_die('Security check failed');
         }
 
+        if (!current_user_can('manage_options') && !current_user_can('kit_update_data')) {
+            wp_die('You do not have permission to manage routes.', 'Forbidden', ['response' => 403]);
+        }
+
         // Sanitize/validate input
         $route_name = isset($_POST['route_name']) ? sanitize_text_field($_POST['route_name']) : '';
-        // Map form field names correctly - the form sends 'country_id' for origin
-        $origin_country_id = isset($_POST['country_id']) ? intval($_POST['country_id']) : 0;
-        $origin_city_id = isset($_POST['city_id']) ? intval($_POST['city_id']) : 0;
+        // Routes form uses country_id / city_id; accept origin_* as fallback
+        $origin_country_id = isset($_POST['country_id']) ? intval($_POST['country_id']) : (isset($_POST['origin_country']) ? intval($_POST['origin_country']) : 0);
+        $origin_city_id = isset($_POST['city_id']) ? intval($_POST['city_id']) : (isset($_POST['origin_city']) ? intval($_POST['origin_city']) : 0);
         $destination_country_id = isset($_POST['destination_country']) ? intval($_POST['destination_country']) : 0;
         $destination_city_id = isset($_POST['destination_city']) ? intval($_POST['destination_city']) : 0;
 

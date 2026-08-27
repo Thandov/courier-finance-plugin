@@ -106,7 +106,7 @@ function render_customer_bulk_invoice_dropdown($config = []) {
                     <option value="<?= esc_attr($customer['id']) ?>"><?= esc_html($customer['name']) ?></option>
                 <?php endforeach; ?>
             </select>
-            <?php echo KIT_Commons::renderButton($config['button_text'], 'primary', 'sm', ['type' => 'submit', 'style' => 'padding: 6px 16px; background: ' . esc_attr($primary_color) . '; color: white; border: none; border-radius: 4px; font-size: 12px; font-weight: 600; cursor: pointer;']); ?>
+            <?php echo KIT_Commons::renderButton($config['button_text'], 'primary', 'lg', ['type' => 'submit', 'style' => 'padding: 6px 16px; background: ' . esc_attr($primary_color) . '; color: white; border: none; border-radius: 4px; font-size: 12px; font-weight: 600; cursor: pointer;']); ?>
         </form>
     </div>
     <?php

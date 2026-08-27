@@ -1,34 +1,4 @@
 <?php
-// #region agent log
-if (!function_exists('kit_agent_debug_log_6b2840')) {
-    function kit_agent_debug_log_6b2840($payload)
-    {
-        $log_path = '/Applications/MAMP/htdocs/08600/wp-content/plugins/courier-finance-plugin/.cursor/debug-6b2840.log';
-        $base = [
-            'sessionId' => '6b2840',
-            'runId' => 'post-fix',
-            'timestamp' => round(microtime(true) * 1000),
-        ];
-        $line = json_encode(array_merge($base, is_array($payload) ? $payload : []));
-        if ($line !== false) {
-            @file_put_contents($log_path, $line . PHP_EOL, FILE_APPEND | LOCK_EX);
-            // Fallback path: also send to the debug ingest endpoint.
-            if (function_exists('wp_remote_post')) {
-                @wp_remote_post('http://127.0.0.1:63332/ingest/2aae1a1f-38bb-43d8-82c7-ca359c71f068', [
-                    'headers' => [
-                        'Content-Type' => 'application/json',
-                        'X-Debug-Session-Id' => '6b2840',
-                    ],
-                    'body' => $line,
-                    'timeout' => 0.5,
-                    'blocking' => false,
-                ]);
-            }
-        }
-    }
-}
-// #endregion
-
 // Determine which charge is greater
 $mass_charge = floatval($waybill['mass_charge'] ?? 0);
 $volume_charge = floatval($waybill['volume_charge'] ?? 0);
@@ -41,12 +11,6 @@ $preferred_charge = $is_mass_greater ? 'mass' : ($is_volume_greater ? 'volume' :
 $primary_charge = $preferred_charge === 'mass' ? $mass_charge : $volume_charge;
 $vat_charge = 0.0;
 
-$destinationCountryName = KIT_Routes::get_country_name_by_id($waybill['miscellaneous']['others']['destination_country_id'] ?? 0);
-// Use canonical waybill.city_id for destination city
-$destinationCityName = KIT_Routes::get_city_name_by_id($waybill['city_id'] ?? 0);
-$originCountryName = KIT_Routes::get_country_name_by_id($waybill['miscellaneous']['others']['origin_country_id'] ?? 0);
-$originCityName = KIT_Routes::get_city_name_by_id($waybill['miscellaneous']['others']['origin_city_id'] ?? 0);
-
 // Normalize miscellaneous data (may be serialized string or array)
 $rawMisc = $waybill['miscellaneous'] ?? [];
 if (!is_array($rawMisc)) {
@@ -55,12 +19,60 @@ if (!is_array($rawMisc)) {
 } else {
     $misc_data = $rawMisc;
 }
+$misc_others = (isset($misc_data['others']) && is_array($misc_data['others'])) ? $misc_data['others'] : [];
+
+// Resolve geography from waybill direction + city (not warehouse delivery direction).
+$destinationCountryName = trim((string) ($waybill['destination_country'] ?? ''));
+if ($destinationCountryName === '' && class_exists('KIT_Routes')) {
+    $dest_country_id = (int) ($misc_others['destination_country_id'] ?? ($waybill['destination_country_id'] ?? 0));
+    if ($dest_country_id <= 0 && !empty($waybill['direction_id'])) {
+        $dest_country_id = KIT_Routes::get_direction_destination_country_id((int) $waybill['direction_id']);
+    }
+    if ($dest_country_id > 0) {
+        $destinationCountryName = (string) KIT_Routes::get_country_name_by_id($dest_country_id);
+    }
+}
+$destinationCityName = class_exists('KIT_Routes')
+    ? (string) KIT_Routes::get_city_name_by_id((int) ($waybill['city_id'] ?? ($misc_others['destination_city_id'] ?? 0)))
+    : '';
+
+$originCountryName = trim((string) ($waybill['origin_country'] ?? ''));
+if ($originCountryName === '' && class_exists('KIT_Routes')) {
+    $origin_country_id = (int) ($misc_others['origin_country_id'] ?? ($waybill['origin_country_id'] ?? 0));
+    if ($origin_country_id > 0) {
+        $originCountryName = (string) KIT_Routes::get_country_name_by_id($origin_country_id);
+    }
+}
+$origin_city_id = (int) ($misc_others['origin_city_id'] ?? 0);
+if ($origin_city_id <= 0 && class_exists('KIT_Routes')) {
+    $origin_country_for_city = (int) ($misc_others['origin_country_id'] ?? ($waybill['origin_country_id'] ?? 0));
+    if ($origin_country_for_city > 0) {
+        $origin_city_id = KIT_Routes::get_default_city_id_for_country($origin_country_for_city);
+    }
+}
+$originCityName = ($origin_city_id > 0 && class_exists('KIT_Routes'))
+    ? (string) KIT_Routes::get_city_name_by_id($origin_city_id)
+    : '';
+
+$kit_format_place = static function ($country, $city): string {
+    $parts = [];
+    foreach ([$country, $city] as $part) {
+        $part = trim((string) $part);
+        if ($part === '' || strcasecmp($part, 'N/A') === 0 || strcasecmp($part, 'null') === 0) {
+            continue;
+        }
+        $parts[] = $part;
+    }
+    return $parts !== [] ? implode(', ', $parts) : 'Not set';
+};
+$originPlaceLabel = $kit_format_place($originCountryName, $originCityName);
+$destinationPlaceLabel = $kit_format_place($destinationCountryName, $destinationCityName);
 
 // Safely resolve totals and flags
 $waybill_items_total = floatval($waybill['waybill_items_total'] ?? 0);
-$include_sad500 = intval($waybill['include_sad500'] ?? 0) === 1;
-$include_sadc = intval($waybill['include_sadc'] ?? 0) === 1;
-$include_vat = intval($waybill['vat_include'] ?? 0) === 1;
+$include_sad500 = class_exists('KIT_Waybills') && (KIT_Waybills::normalize_flag_int($waybill['include_sad500'] ?? 0) === 1);
+$include_sadc = class_exists('KIT_Waybills') && (KIT_Waybills::normalize_flag_int($waybill['include_sadc'] ?? 0) === 1);
+$include_vat = class_exists('KIT_Waybills') && (KIT_Waybills::normalize_flag_int($waybill['vat_include'] ?? 0) === 1);
 
 $misc_total = 0.0;
 if (isset($misc_data['misc_total'])) {
@@ -89,26 +101,6 @@ $additional_charges_total = null;
 $additional_charges_summary = null;
 $calculated_total = null;
 
-// #region agent log
-kit_agent_debug_log_6b2840([
-    'hypothesisId' => 'H1-H5',
-    'location' => 'includes/components/viewWaybill.php:initial-values',
-    'message' => 'Initial waybill values loaded',
-    'data' => [
-        'waybill_no' => $waybill_no,
-        'mass_charge' => $mass_charge,
-        'volume_charge' => $volume_charge,
-        'waybill_items_total_row' => $waybill_items_total,
-        'include_vat' => $include_vat,
-        'include_sad500' => $include_sad500,
-        'include_sadc' => $include_sadc,
-        'stored_total' => $stored_total,
-        'misc_total' => $misc_total,
-        'intl_price_snapshot' => $international_price_rands,
-    ],
-]);
-// #endregion
-
 $calculated_items_total = 0.0;
 if (!empty($waybill['items']) && is_array($waybill['items'])) {
     foreach ($waybill['items'] as $item) {
@@ -124,21 +116,10 @@ if (!empty($waybill['items']) && is_array($waybill['items'])) {
 if ($calculated_items_total > 0) {
     $waybill_items_total = $calculated_items_total;
 }
-$vat_charge = ($include_vat && $waybill_items_total > 0) ? $waybill_items_total * 0.10 : 0.0;
-
-// #region agent log
-kit_agent_debug_log_6b2840([
-    'hypothesisId' => 'H2-H4',
-    'location' => 'includes/components/viewWaybill.php:items-recalc',
-    'message' => 'Item totals and pre-breakdown VAT',
-    'data' => [
-        'calculated_items_total_from_rows' => $calculated_items_total,
-        'effective_waybill_items_total' => $waybill_items_total,
-        'vat_charge_pre_breakdown' => $vat_charge,
-        'vat_formula_pre_breakdown' => 'items_total * 0.10',
-    ],
-]);
-// #endregion
+$vat_rate_pct = class_exists('KIT_Waybills') ? (float) KIT_Waybills::vatRate() : 10.0;
+$vat_charge = ($include_vat && $waybill_items_total > 0)
+    ? (class_exists('KIT_Waybills') ? KIT_Waybills::vatCharge($waybill_items_total) : $waybill_items_total * 0.10)
+    : 0.0;
 
 $calculation_breakdown = null;
 $using_breakdown = false;
@@ -161,22 +142,6 @@ if (class_exists('KIT_Waybills') && $waybill_no > 0) {
     }
 }
 
-// #region agent log
-kit_agent_debug_log_6b2840([
-    'hypothesisId' => 'H1-H3',
-    'location' => 'includes/components/viewWaybill.php:doublecalc-result',
-    'message' => 'doubleCalcWaybillTotal response',
-    'data' => [
-        'using_breakdown' => $using_breakdown,
-        'double_calc_error' => (is_array($double_calc) && isset($double_calc['error'])) ? $double_calc['error'] : null,
-        'double_calc_db_total' => is_array($double_calc) ? ($double_calc['db_total'] ?? null) : null,
-        'double_calc_calc_total' => is_array($double_calc) ? ($double_calc['calc_total'] ?? null) : null,
-        'breakdown_vat' => (is_array($calculation_breakdown) && isset($calculation_breakdown['additional_charges']['vat'])) ? $calculation_breakdown['additional_charges']['vat'] : null,
-        'breakdown_waybill_amount' => (is_array($calculation_breakdown) && isset($calculation_breakdown['totals']['waybill_amount'])) ? $calculation_breakdown['totals']['waybill_amount'] : null,
-    ],
-]);
-// #endregion
-
 if ($using_breakdown) {
     $base_charges = $calculation_breakdown['base_charges'] ?? [];
     $additional_charges = $calculation_breakdown['additional_charges'] ?? [];
@@ -198,11 +163,16 @@ if ($using_breakdown) {
     if (isset($additional_charges['misc_total'])) {
         $misc_total = floatval($additional_charges['misc_total']);
     }
-    if (isset($additional_charges['sad500'])) {
+    // Only apply calculator SAD500/SADC when DB flags are on — otherwise a stale breakdown or misc snapshot could show charges with include_sad500 = 0.
+    if ($include_sad500 && isset($additional_charges['sad500'])) {
         $sad500_amount = floatval($additional_charges['sad500']);
+    } else {
+        $sad500_amount = 0.0;
     }
-    if (isset($additional_charges['sadc'])) {
+    if ($include_sadc && isset($additional_charges['sadc'])) {
         $sadc_amount = floatval($additional_charges['sadc']);
+    } else {
+        $sadc_amount = 0.0;
     }
     if (isset($additional_charges['vat'])) {
         $vat_charge = floatval($additional_charges['vat']);
@@ -216,9 +186,8 @@ if ($using_breakdown) {
     // "Additional total" should match D. Additional (SAD500 + SADC only, excluding handling fee)
     $additional_charges_summary = $additional_charges_total;
 
-    if (isset($totals_section['final_total'])) {
-        $calculated_total = floatval($totals_section['final_total']);
-    }
+    // Recompute line-item total from breakdown components so gated SAD500/SADC stays consistent (do not trust final_total if flags were off in DB).
+    $calculated_total = $primary_charge + $misc_total + ($include_vat ? $vat_charge : $handling_fee) + $sad500_amount + $sadc_amount;
     if (defined('WP_DEBUG') && WP_DEBUG) {
         error_log('[viewWaybill] breakdown primary=' . $primary_charge . ' mass=' . $mass_charge . ' volume=' . $volume_charge . ' additional_total=' . $additional_charges_total . ' calc_total=' . $calculated_total);
     }
@@ -259,6 +228,12 @@ if ($total_volume > 0.0) {
     }
 }
 
+// A charge formula may only be printed when both of its terms are actually known.
+// Seeded rows frequently carry a charge with no mass/volume captured, which would
+// otherwise render as "— × R 0.00 = R 878.64".
+$show_mass_formula = ($total_mass_kg > 0 && $mass_rate > 0);
+$show_volume_formula = ($total_volume > 0 && $volume_rate > 0);
+
 // Additional charges total should only include SAD500 + SADC (not VAT or handling fee, as those are shown separately)
 $additional_charges_total = $additional_charges_total ?? ($sad500_amount + $sadc_amount);
 // For display: D. Additional is the same as additional_charges_total (SAD500 + SADC only)
@@ -270,795 +245,209 @@ $calculated_total = $calculated_total ?? ($primary_charge + $misc_total + ($incl
 $totals_match = abs($calculated_total - $stored_total) < 0.01;
 $grand_total_display = $calculated_total;
 
-if (!$totals_match && class_exists('KIT_Waybills') && $waybill_no > 0) {
-    $updatedTotalCheck = KIT_Waybills::doubleCalcWaybillTotal([
-        'waybill_no' => $waybill_no,
-        'update_if_mismatch' => true,
-    ]);
+// Viewing a waybill must never write to it. Reconciliation happens on save
+// (KIT_Waybills::update_waybill_action) and via the explicit repair tools; here we
+// only report a disagreement so the approver can see it instead of it being
+// silently overwritten during a page load.
+$totals_stored_total = $stored_total;
+$totals_calculated_total = $calculated_total;
+$totals_difference = round($calculated_total - $stored_total, 2);
 
-    if (is_array($updatedTotalCheck) && empty($updatedTotalCheck['error'])) {
-        if (!empty($updatedTotalCheck['updated'])) {
-            $stored_total = floatval($updatedTotalCheck['calc_total'] ?? $stored_total);
-        } elseif (isset($updatedTotalCheck['db_total'])) {
-            $stored_total = floatval($updatedTotalCheck['db_total']);
+// Shared view-model. Both layouts consume these; neither may re-derive a fact
+// the other already shows, or switching layout hides information.
+$kit_empty_label = static function (string $value): string {
+    $v = trim($value);
+    if ($v === '' || strcasecmp($v, 'N/A') === 0 || strcasecmp($v, 'null') === 0 || $v === '-') {
+        return 'Not provided';
+    }
+    return $v;
+};
+
+$can_see_prices = class_exists('KIT_User_Roles') && KIT_User_Roles::can_see_prices();
+$waybill_id = (int) ($waybill['id'] ?? ($waybill_id ?? 0));
+$edit_url = '?page=08600-Waybill-view&waybill_id=' . $waybill_id . '&edit=true';
+$pdf_url = (defined('COURIER_FINANCE_PLUGIN_URL') ? COURIER_FINANCE_PLUGIN_URL : plugin_dir_url(__FILE__) . '../../')
+    . 'pdf-generator.php?waybill_no=' . rawurlencode((string) ($waybill['waybill_no'] ?? ''))
+    . '&pdf_nonce=' . wp_create_nonce('pdf_nonce');
+
+$pdfVerifier = class_exists('KIT_Waybills') ? KIT_Waybills::pdfVerifier($waybill['waybill_no'] ?? '', null) : [];
+$canAccessPDF = !empty($pdfVerifier['soWhat']) && $can_see_prices;
+$can_edit = class_exists('KIT_User_Roles') && KIT_User_Roles::can_edit_approved_waybill($waybill['approval'] ?? 'pending');
+
+$approval_status = (string) ($waybill['approval'] ?? 'pending');
+$approval_labels = class_exists('KIT_Commons') ? KIT_Commons::approvalStatusLabels() : [];
+$approval_label = $approval_labels[$approval_status] ?? $approval_status;
+$is_approved = in_array($approval_status, ['approved', 'completed'], true);
+$is_invoiced = (isset($waybill['status']) && $waybill['status'] === 'invoiced');
+$show_approve_invoice = class_exists('KIT_User_Roles')
+    && KIT_User_Roles::can_approve()
+    && KIT_User_Roles::can_invoice()
+    && !($is_approved && $is_invoiced);
+
+$view_company_id = (int) ($waybill['company_id'] ?? 0);
+$view_company_name = trim((string) ($waybill['company_name'] ?? ''));
+$is_company_customer = $view_company_id > 0;
+if (!$is_company_customer && $view_company_name !== '') {
+    $is_company_customer = class_exists('KIT_Company_Customers')
+        ? !KIT_Company_Customers::is_placeholder_company($view_company_name)
+        : !in_array(strtolower($view_company_name), ['individual', '1ndividual', 'private'], true);
+}
+$view_vat = trim((string) ($waybill['vat_number'] ?? ''));
+$view_cell = trim((string) ($waybill['cell'] ?? ''));
+$view_telephone = trim((string) ($waybill['telephone'] ?? ''));
+$view_email = trim((string) ($waybill['email_address'] ?? ''));
+$view_contact = $view_cell !== '' ? $view_cell : $view_telephone;
+$customer_title = $is_company_customer
+    ? $kit_empty_label($view_company_name)
+    : trim($kit_empty_label((string) ($waybill['customer_name'] ?? '')) . ' ' . $kit_empty_label((string) ($waybill['customer_surname'] ?? '')));
+if (trim($customer_title) === 'Not provided Not provided') {
+    $customer_title = 'Customer';
+}
+$client_invoice = trim((string) ($misc_others['client_invoice'] ?? ''));
+
+$delivery_ref = trim((string) ($waybill['delivery_reference'] ?? ''));
+$is_pending_delivery = $delivery_ref !== '' && strcasecmp($delivery_ref, 'pending') === 0;
+$is_warehouse = !empty($waybill['warehouse']) && ((int) $waybill['warehouse'] === 1 || $waybill['warehouse'] === true);
+$effectively_warehouse = $is_warehouse || $is_pending_delivery;
+
+$dispatch_display = '—';
+if (!$effectively_warehouse) {
+    $d = $waybill['dispatch_date'] ?? '';
+    $dispatch_display = $d ? KIT_Commons::viewDate($d, 'Not set') : 'Not set';
+}
+
+$driver_name = trim((string) ($waybill['driver_name'] ?? ''));
+if ($driver_name === '' && !empty($waybill['truck_driver']) && is_numeric($waybill['truck_driver'])) {
+    global $wpdb;
+    $driver_name = (string) $wpdb->get_var($wpdb->prepare(
+        "SELECT name FROM {$wpdb->prefix}kit_drivers WHERE id = %d LIMIT 1",
+        (int) $waybill['truck_driver']
+    ));
+}
+$driver_display = $effectively_warehouse ? '—' : (($driver_name !== '') ? $driver_name : 'Not assigned');
+$truck = trim((string) ($waybill['truck_number'] ?? ''));
+$truck_display = $effectively_warehouse ? '—' : ($truck !== '' ? $truck : 'Not assigned');
+
+$charge_basis_file = COURIER_FINANCE_PLUGIN_PATH . 'includes/sync/kit-charge-basis.php';
+if (file_exists($charge_basis_file)) {
+    require_once $charge_basis_file;
+}
+$raw_basis = $waybill['charge_basis'] ?? '';
+if (($raw_basis === '' || $raw_basis === null) && !empty($misc_others['used_charge_basis'])) {
+    $raw_basis = $misc_others['used_charge_basis'];
+}
+$basis_norm = function_exists('kit_seed_normalize_charge_basis')
+    ? kit_seed_normalize_charge_basis((string) $raw_basis)
+    : strtolower(trim((string) $raw_basis));
+$billed_freight = function_exists('kit_seed_total_from_charge_basis')
+    ? kit_seed_total_from_charge_basis((float) $mass_charge, (float) $volume_charge, (string) $raw_basis)
+    : (float) $primary_charge;
+
+$waybill_description = '';
+if (!empty($waybill['description'])) {
+    $waybill_description = trim((string) $waybill['description']);
+}
+if ($waybill_description === '' && !empty($misc_others['waybill_description'])) {
+    $waybill_description = trim((string) $misc_others['waybill_description']);
+}
+$description_lines = [];
+if ($waybill_description !== '') {
+    $normalized_desc = preg_replace('/\s+/', ' ', $waybill_description);
+    if (preg_match('/^(.*?)(?:\s+WB\s*:\s*-?\s*)(.+?)(?:\s+Supplier\s*:\s*-?\s*)(.+?)(?:\s+Date\s*:\s*-?\s*)(.+)$/i', $normalized_desc, $dm)) {
+        $goods = trim($dm[1]);
+        if ($goods !== '') {
+            $description_lines[] = $goods;
         }
-        $totals_match = abs($calculated_total - $stored_total) < 0.01;
+        $described_waybill_no = trim($dm[2]);
+        if ($described_waybill_no !== '' && $described_waybill_no !== trim((string) ($waybill['waybill_no'] ?? ''))) {
+            $description_lines[] = 'Waybill stated in description: ' . $described_waybill_no;
+        }
+        $description_lines[] = 'Supplier: ' . trim($dm[3]);
+        $description_lines[] = 'Document date: ' . trim($dm[4]);
+    } else {
+        $description_lines[] = $waybill_description;
     }
 }
 
-// #region agent log
-kit_agent_debug_log_6b2840([
-    'hypothesisId' => 'H1-H3',
-    'location' => 'includes/components/viewWaybill.php:final-summary',
-    'message' => 'Final values used for display',
-    'data' => [
-        'primary_charge' => $primary_charge,
-        'vat_charge_final' => $vat_charge,
-        'misc_total_final' => $misc_total,
-        'handling_fee_final' => $handling_fee,
-        'additional_charges_total_final' => $additional_charges_total,
-        'calculated_total_final' => $calculated_total,
-        'stored_total_final' => $stored_total,
-        'totals_match' => $totals_match,
-        'include_vat' => $include_vat,
-    ],
-]);
-// #endregion
+$len = isset($waybill['item_length']) && $waybill['item_length'] !== '' ? floatval($waybill['item_length']) : 0.0;
+$wid = isset($waybill['item_width']) && $waybill['item_width'] !== '' ? floatval($waybill['item_width']) : 0.0;
+$hei = isset($waybill['item_height']) && $waybill['item_height'] !== '' ? floatval($waybill['item_height']) : 0.0;
+$volume_val = $total_volume;
+$dims_are_derived_cube = false;
+if ($len > 0 && $wid > 0 && $hei > 0 && $volume_val > 0) {
+    $sides_equal = abs($len - $wid) < 0.05 && abs($wid - $hei) < 0.05;
+    $cube_side_cm = pow($volume_val, 1 / 3) * 100;
+    $dims_are_derived_cube = $sides_equal && abs($len - $cube_side_cm) < 0.6;
+}
 
-?>
-<style>
-    .waybill-items-container {
-        max-width: 100%;
-        overflow: hidden;
+$createdByName  = KIT_Commons::getNameOfUser($waybill['created_by'] ?? 0);
+$createdAt      = !empty($waybill['created_at']) ? KIT_Commons::viewDate($waybill['created_at'], '') : '';
+$approvedById   = (int) ($waybill['approved_by'] ?? $waybill['approval_userid'] ?? 0);
+$approvedByName = $approvedById > 0 ? KIT_Commons::getNameOfUser($approvedById) : '';
+$approvedAt     = !empty($waybill['approved_at']) ? KIT_Commons::viewDate($waybill['approved_at'], '') : '';
+$lastUpdated    = !empty($waybill['last_updated_at']) ? KIT_Commons::viewDate($waybill['last_updated_at'], '') : $createdAt;
+$lastUpdatedById = (int) ($waybill['last_updated_by'] ?? 0);
+$lastUpdatedByName = $lastUpdatedById > 0 ? KIT_Commons::getNameOfUser($lastUpdatedById) : '';
+
+$has_misc_items = !empty($misc_data['misc_items']) && is_array($misc_data['misc_items']);
+
+$route_label = 'Not set';
+if ($originCountryName !== '' || $destinationCountryName !== '') {
+    $route_label = trim($originCountryName !== '' ? $originCountryName : 'Origin')
+        . ' → '
+        . trim($destinationCountryName !== '' ? $destinationCountryName : 'Destination');
+}
+
+require_once COURIER_FINANCE_PLUGIN_PATH . 'includes/components/edit-waybill/kit-edit-waybill-templates.php';
+
+$kit_edit_template_id = kit_edit_waybill_get_active_template_id();
+$kit_view_template_id = ($kit_edit_template_id === 'edit_waybill_template2')
+    ? 'view_waybill_template2'
+    : 'view_waybill_template1';
+$kit_view_template_path = COURIER_FINANCE_PLUGIN_PATH . 'includes/components/view-waybill/' . $kit_view_template_id . '.php';
+if (!is_readable($kit_view_template_path)) {
+    $kit_view_template_id = 'view_waybill_template1';
+    $kit_view_template_path = COURIER_FINANCE_PLUGIN_PATH . 'includes/components/view-waybill/view_waybill_template1.php';
+}
+
+if (function_exists('wp_enqueue_style')) {
+    if ($kit_view_template_id === 'view_waybill_template2') {
+        wp_enqueue_style(
+            'kit-waybill-template2',
+            COURIER_FINANCE_PLUGIN_URL . 'assets/css/kit-waybill-template2.css',
+            [],
+            '1.0.2'
+        );
     }
-
-    .waybill-items-container table {
-        table-layout: auto;
-        width: 100%;
-        max-width: 100%;
-    }
-</style>
-
-<div class="max-w-6xl mx-auto p-3 md:p-6 space-y-4 md:space-y-6 bg-white rounded-lg shadow-md">
-
-    <!-- Breadcrumb Navigation -->
-    <?php if (isset($breadlinks) && is_array($breadlinks) && !empty($breadlinks)): ?>
-    <nav aria-label="breadcrumb" class="mb-4">
-        <ol class="flex items-center text-sm text-gray-500 space-x-2">
-            <?php foreach ($breadlinks as $index => $link): ?>
-                <?php if ($index > 0): ?>
-                    <li class="text-gray-400">/</li>
-                <?php endif; ?>
-                <li>
-                    <?php if (!empty($link['slug']) && $index < count($breadlinks) - 1): ?>
-                        <a href="<?php echo esc_url($link['slug']); ?>" class="text-gray-600 hover:text-gray-900 hover:underline">
-                            <?php echo esc_html($link['name']); ?>
-                        </a>
-                    <?php else: ?>
-                        <span class="text-gray-900 font-medium"><?php echo esc_html($link['name']); ?></span>
-                    <?php endif; ?>
-                </li>
-            <?php endforeach; ?>
-        </ol>
-    </nav>
-    <?php endif; ?>
-
-    <div class="flex flex-col space-y-6 justify-between items-start border-b pb-4">
-        <h1 class="text-xl md:text-2xl font-bold text-gray-800">Waybill #<?= htmlspecialchars($waybill['waybill_no'] ?? 'N/A') ?>
-        </h1>
-        <div class="grid grid-cols-1 sm:grid-cols-2 gap-4 w-full">
-            <div>
-                <div class="ss">
-                    <?php if (isset($_GET['approval_updated']) && $_GET['approval_updated'] == '1'): ?>
-                        <div id="approval-success-message" class="mb-4 p-4 bg-green-100 border border-green-400 text-green-700 rounded">
-                            <strong>Success!</strong> Approval status has been updated.
-                        </div>
-                    <?php endif; ?>
-
-
-                    <!-- Top action bar: PDF + status controls -->
-                    <div class="flex flex-wrap items-center gap-3 mb-3">
-                        <?php
-                        // Check both waybill approval status AND user permissions for PDF access
-                        $pdfVerifier = KIT_Waybills::pdfVerifier($waybill['waybill_no'] ?? '', $waybill_id = null);
-                        $canAccessPDF = isset($pdfVerifier['soWhat']) && $pdfVerifier['soWhat'] && KIT_User_Roles::can_see_prices();
-
-                        if ($canAccessPDF) { ?>
-                            <div class="waybill-action-btn-wrap inline-flex shrink-0">
-                                <?= KIT_Commons::renderButton(
-                                    'PDF',
-                                    'primary',
-                                    'md',
-                                    [
-                                        'href' => plugin_dir_url(__FILE__) . '../../pdf-generator.php?waybill_no=' . $waybill['waybill_no'] . '&pdf_nonce=' . wp_create_nonce('pdf_nonce'),
-                                        'target' => '_blank',
-                                        'rel' => 'noopener noreferrer',
-                                        'gradient' => true,
-                                        'icon' => '<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
-                                            d="M17 17h2a2 2 0 002-2v-4a2 2 0 00-2-2H5a2 2 0 00-2 2v4a2 2 0 002 2h2m2 4h6a2 2 0 002-2v-4a2 2 0 00-2-2H9a2 2 0 00-2 2v4a2 2 0 002 2zm8-12V5a2 2 0 00-2-2H9a2 2 0 00-2 2v4h10z" />',
-                                    ]
-                                ); ?>
-                            </div>
-                        <?php
-                        }
-                        ?>
-                        <div class="flex flex-col">
-                            <label class="<?= KIT_Commons::labelClass() ?>">Invoice Status:</label>
-                            <?= KIT_Commons::waybillQuoteStatus(esc_attr((string)($waybill['waybill_no'] ?? '')), esc_attr((string)($waybill['id'] ?? '')), 'select'); ?>
-                        </div>
-                        <div class="flex flex-col">
-                            <label class="<?= KIT_Commons::labelClass() ?>">Approval Status:</label>
-                            <div class="flex flex-wrap items-center gap-2">
-                                <?= KIT_Commons::waybillApprovalStatus(esc_attr((string)($waybill['waybill_no'] ?? '')), esc_attr((string)($waybill['id'] ?? '')), esc_attr((string)($waybill['approval'] ?? '')), 'select'); ?>
-                                <?php
-                                $is_approved = (isset($waybill['approval']) && ($waybill['approval'] === 'approved' || $waybill['approval'] === 'completed'));
-                                $is_invoiced = (isset($waybill['status']) && $waybill['status'] === 'invoiced');
-                                $show_approve_invoice = (KIT_User_Roles::can_approve() && KIT_User_Roles::can_invoice() && !($is_approved && $is_invoiced));
-                                if ($show_approve_invoice) :
-                                    $waybill_no_attr = esc_attr((string)($waybill['waybill_no'] ?? ''));
-                                    $waybill_id_attr = esc_attr((string)($waybill['id'] ?? ''));
-                                ?>
-                                <form method="POST" action="<?= esc_url(admin_url('admin-post.php')) ?>" class="inline">
-                                    <input type="hidden" name="action" value="waybill_approve_and_invoice">
-                                    <input type="hidden" name="waybillno" value="<?= $waybill_no_attr ?>">
-                                    <input type="hidden" name="waybillid" value="<?= $waybill_id_attr ?>">
-                                    <?php wp_nonce_field('update_waybill_approval_nonce'); ?>
-                                    <?= KIT_Commons::renderButton('Approve & Invoice', 'primary', 'sm', ['type' => 'submit']); ?>
-                                </form>
-                                <?php endif; ?>
-                            </div>
-                        </div>
-                        <?php
-                        // Show warehouse dropdown for waybills in warehouse
-                        $is_in_warehouse = isset($waybill['warehouse']) && (intval($waybill['warehouse']) == 1 || $waybill['warehouse'] === true);
-
-                        if ($is_in_warehouse):
-                            // Check if waybill has warehouse items
-                            require_once plugin_dir_path(__FILE__) . '../warehouse/warehouse-functions.php';
-                            $warehouse_items = KIT_Warehouse::getWarehouseItems($waybill['id']);
-                            if (!empty($warehouse_items)): ?>
-                                <div class="flex flex-col">
-                                    <label class="<?= KIT_Commons::labelClass() ?>">Warehoused:</label>
-                                    <?= KIT_Commons::warehouseDeliveryAssignment(
-                                        $waybill['id'],
-                                        $waybill['waybill_no'],
-                                        $waybill['destination_country'] ?? '',
-                                        $waybill['destination_country_id'] ?? '',
-                                        $waybill['status']
-                                    ); ?>
-                                </div>
-                        <?php
-                            endif;
-                        endif;
-                        ?>
-                    </div>
-
-                    <?php if (isset($_GET['invoice_status_updated']) && $_GET['invoice_status_updated'] == '1'): ?>
-                        <div id="invoice-status-message" class="mb-4 p-4 bg-blue-100 border border-blue-400 text-blue-700 rounded">
-                            <strong>Note:</strong> Invoice status has been automatically set to "Pending" because the approval status was changed from "Approved" or "Completed".
-                        </div>
-                    <?php endif; ?>
-
-                    <?php if (isset($_GET['approval_error']) && $_GET['approval_error'] == '1'): ?>
-                        <div id="approval-error-message" class="mb-4 p-4 bg-red-100 border border-red-400 text-red-700 rounded">
-                            <strong>Error!</strong> Failed to update approval status. Please try again.
-                        </div>
-                    <?php endif; ?>
-
-                    <?php if (isset($_GET['assignment_success']) && $_GET['assignment_success'] == '1'): ?>
-                        <div id="assignment-success-message" class="mb-4 p-4 bg-green-100 border border-green-400 text-green-700 rounded">
-                            <strong>Success!</strong> Waybill has been assigned to delivery truck.
-                        </div>
-                    <?php endif; ?>
-
-                    <?php if (isset($_GET['assignment_error'])): ?>
-                        <div id="assignment-error-message" class="mb-4 p-4 bg-red-100 border border-red-400 text-red-700 rounded">
-                            <strong>Error!</strong>
-                            <?php
-                            $error_code = $_GET['assignment_error'];
-                            switch ($error_code) {
-                                case '1':
-                                    echo 'Invalid waybill or delivery ID.';
-                                    break;
-                                case '2':
-                                    echo 'Waybill not found or not pending.';
-                                    break;
-                                case '3':
-                                    echo 'Delivery not found.';
-                                    break;
-                                case '4':
-                                    echo 'Waybill is already assigned to a delivery.';
-                                    break;
-                                case '5':
-                                    echo 'Failed to assign waybill. Please try again.';
-                                    break;
-                                default:
-                                    echo 'Unknown error occurred.';
-                                    break;
-                            }
-                            ?>
-                        </div>
-                    <?php endif; ?>
-                </div>
-                <!-- Compact display section: created / approved / last updated -->
-                <div class="flex flex-wrap items-center gap-3 text-xs mt-1">
-                    <?php
-                    $pdfVerifier = KIT_Waybills::pdfVerifier($waybill['waybill_no'] ?? '', $waybill_id = null);
-                    if (isset($pdfVerifier['soWhat']) && $pdfVerifier['soWhat']) {
-                        echo KIT_Commons::statusBadge('approved');
-                    } else {
-                        echo KIT_Commons::statusBadge('pending');
-                    }
-
-                    $createdByName  = KIT_Commons::getNameOfUser($waybill['created_by'] ?? 0);
-                    $createdAt      = !empty($waybill['created_at']) ? date('M j, Y', strtotime($waybill['created_at'])) : '';
-                    $approvedByName = !empty($waybill['approved_by']) ? KIT_Commons::getNameOfUser($waybill['approved_by']) : '';
-                    $approvedAt     = (!empty($waybill['approved_at']) && strtotime($waybill['approved_at']) > 0) ? date('M j, Y', strtotime($waybill['approved_at'])) : '';
-                    $lastUpdated    = !empty($waybill['last_updated_at']) ? date('M j, Y', strtotime($waybill['last_updated_at'])) : $createdAt;
-                    ?>
-                    <span class="text-gray-700">
-                        <span class="font-semibold">Created by:</span>
-                        <?= esc_html($createdByName) ?>
-                        <?php if ($createdAt): ?>
-                            <span class="text-gray-500"> <?= esc_html($createdAt) ?></span>
-                        <?php endif; ?>
-                    </span>
-                    <?php if ($approvedByName): ?>
-                        <span class="text-gray-700">
-                            <span class="font-semibold">Approved by:</span>
-                            <?= esc_html($approvedByName) ?>
-                            <?php if ($approvedAt): ?>
-                                <span class="text-gray-500"> <?= esc_html($approvedAt) ?></span>
-                            <?php endif; ?>
-                        </span>
-                    <?php endif; ?>
-                    <span class="text-gray-500">
-                        <span class="font-semibold">Last Updated:</span>
-                        <?= esc_html($lastUpdated) ?>
-                    </span>
-                </div>
-            </div>
-
-            <div class="text-right">
-                <div class="border-2 border-gray-300 rounded-lg p-4 bg-gray-50">
-
-                    <?php if (class_exists('KIT_User_Roles') && KIT_User_Roles::can_see_prices()): ?>
-                        <div class="flex justify-between items-center px-4">
-                            <span class="text-lg font-semibold text-gray-900">Grand Total</span>
-                            <span class="text-xl font-bold text-gray-900"><?= KIT_Commons::displayWaybillTotal($grand_total_display) ?></span>
-                        </div>
-                    <?php endif; ?>
-                    <!-- Professional minimalistic waybill info display -->
-                    <?php
-                    $waybill_info_options = [
-                        'show_amount' => true,
-                        'class' => 'mt-4',
-                        'exclude' => ['grand_total', 'tracking']
-                    ];
-                    require COURIER_FINANCE_PLUGIN_PATH . 'includes/components/waybillInfoDisplay.php';
-                    ?>
-                </div>
-            </div>
-
-        </div>
-
-        <!-- VAT Warning Display -->
-        <?php if (isset($_GET['vat_warning']) && $_GET['vat_warning'] == '1'): ?>
-            <div class="bg-yellow-50 border-l-4 border-yellow-400 p-4 mb-4">
-                <div class="flex">
-                    <div class="flex-shrink-0">
-                        <svg class="h-5 w-5 text-yellow-400" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor">
-                            <path fill-rule="evenodd" d="M8.257 3.099c.765-1.36 2.722-1.36 3.486 0l5.58 9.92c.75 1.334-.213 2.98-1.742 2.98H4.42c-1.53 0-2.493-1.646-1.743-2.98l5.58-9.92zM11 13a1 1 0 11-2 0 1 1 0 012 0zm-1-8a1 1 0 00-1 1v3a1 1 0 002 0V6a1 1 0 00-1-1z" clip-rule="evenodd" />
-                        </svg>
-                    </div>
-                    <div class="ml-3">
-                        <p class="text-sm text-yellow-700">
-                            <strong>VAT Warning:</strong> VAT was checked but no parcels were found. No VAT was added to the total.
-                        </p>
-                    </div>
-                </div>
-            </div>
-        <?php endif; ?>
-
-        <div class="grid grid-cols-1 md:grid-cols-2 gap-4 w-full">
-            <div class="ps">
-                <?= KIT_Commons::h2tag(['title' => 'Waybill Description', 'class' => '']) ?>
-                <?php
-                // Safely get waybill description with proper fallback
-                // Priority: 1) Direct 'description' column, 2) miscellaneous['others']['waybill_description']
-                $waybill_description = '';
-
-                // First check the direct 'description' column (from database)
-                if (!empty($waybill['description'])) {
-                    $waybill_description = trim($waybill['description']);
-                }
-
-                // Fallback to miscellaneous field if direct column is empty
-                if (empty($waybill_description) && !empty($waybill['miscellaneous'])) {
-                    $description_misc = maybe_unserialize($waybill['miscellaneous']);
-                    if (is_array($description_misc) && isset($description_misc['others']['waybill_description'])) {
-                        $waybill_description = trim($description_misc['others']['waybill_description']);
-                    }
-                }
-                ?>
-                <p class="text-sm text-gray-700 <?= empty($waybill_description) ? 'italic text-gray-400' : '' ?>">
-                    <?= !empty($waybill_description) ? esc_html($waybill_description) : 'No description provided' ?>
-                </p>
-            </div>
-
-        </div>
-    </div>
-
-    <!-- COMPACT COST SUMMARY -->
-    <?php if (class_exists('KIT_User_Roles') && KIT_User_Roles::can_see_prices()): ?>
-        <div class="bg-gray-50 border border-gray-200 rounded-md p-3 mb-4">
-            <h2 class="text-sm font-semibold text-gray-800 mb-2">Cost Summary</h2>
-
-            <div class="grid grid-cols-1 lg:grid-cols-2 gap-4">
-                <!-- LEFT: Components (dense) -->
-                <div class="space-y-2">
-                    <div class="bg-white border border-gray-200 rounded p-3">
-                        <div class="flex justify-between text-xs text-gray-600">
-                            <span>Mass</span>
-                            <span><?= KIT_Commons::currency() . number_format($mass_rate, 2) ?> × <?= number_format($total_mass_kg, 2) ?>kg = <?= KIT_Commons::currency() . number_format($mass_charge, 2) ?></span>
-                        </div>
-                        <div class="flex justify-between text-xs text-gray-600 mt-1">
-                            <span>Volume</span>
-                            <span><?= number_format($total_volume, 2) ?>m³ × <?= KIT_Commons::currency() . number_format($volume_rate, 2) ?> = <?= KIT_Commons::currency() . number_format($volume_display_charge, 2) ?></span>
-                        </div>
-                        <div class="flex justify-between items-center mt-2 pt-2 border-t">
-                            <span class="text-xs font-semibold">Basis: <?= ucfirst($preferred_charge) ?></span>
-                            <span class="text-sm font-bold"><?= KIT_Commons::currency() . number_format($primary_charge, 2) ?></span>
-                        </div>
-                    </div>
-
-                    <div class="bg-white border border-gray-200 rounded p-3">
-                        <?php if ($waybill_items_total > 0): ?>
-                            <div class="flex justify-between text-xs">
-                                <span class="text-gray-600">Items value (not added)</span>
-                                <span class="font-semibold"><?= KIT_Commons::currency() . number_format($waybill_items_total, 2) ?></span>
-                            </div>
-                            <?php if ($vat_charge > 0): ?>
-                                <div class="flex justify-between text-xs mt-1">
-                                    <span class="text-gray-600">VAT (10%)</span>
-                                    <span class="font-semibold"><?= KIT_Commons::currency() . number_format($vat_charge, 2) ?></span>
-                                </div>
-                            <?php endif; ?>
-                        <?php else: ?>
-                            <div class="flex justify-between text-xs">
-                                <span class="text-gray-600">Items value</span>
-                                <span class="font-semibold"><?= KIT_Commons::currency() . number_format($waybill_items_total, 2) ?></span>
-                            </div>
-                        <?php endif; ?>
-                        <div class="flex justify-between text-xs mt-1">
-                            <span class="text-gray-600">Miscellaneous</span>
-                            <span class="font-semibold"><?= KIT_Commons::currency() . number_format($misc_total, 2) ?></span>
-                        </div>
-                    </div>
-
-                    <div class="bg-white border border-gray-200 rounded p-3">
-
-
-                        <?php if ($include_sad500): ?>
-                            <div class="flex justify-between text-xs"><span class="text-gray-600">SAD500</span><span class="font-medium"><?= KIT_Commons::currency() . number_format($sad500_amount, 2) ?></span></div>
-                        <?php endif; ?>
-                        <?php if ($include_sadc): ?>
-                            <div class="flex justify-between text-xs mt-1"><span class="text-gray-600">SADC</span><span class="font-medium"><?= KIT_Commons::currency() . number_format($sadc_amount, 2) ?></span></div>
-                        <?php endif; ?>
-                        <?php if (!$include_sad500 && !$include_sadc && $handling_fee <= 0 && !isset($misc_data['others']['international_price_rands'])): ?>
-                            <div class="text-[11px] text-gray-500">No additional charges<?php if (isset($waybill['international_price_in_rands']) && floatval($waybill['international_price_in_rands']) > 0): ?> — International Price: <span class="font-medium text-gray-700"><?= KIT_Commons::currency() . number_format(floatval($waybill['international_price_in_rands']), 2) ?></span><?php endif; ?></div>
-                        <?php endif; ?>
-                        <div class="flex justify-between items-center mt-2 pt-2 border-t">
-                            <span class="text-xs font-semibold">Additional total</span>
-                            <span class="text-sm font-bold"><?= KIT_Commons::currency() . number_format($additional_charges_summary, 2) ?></span>
-                        </div>
-
-                    </div>
-                </div>
-
-                <!-- RIGHT: Totals (dense) -->
-                <div class="space-y-2">
-                    <div class="bg-white border border-gray-200 rounded p-3">
-                        <div class="flex justify-between text-xs"><span>A. Primary</span><span class="font-medium"><?= KIT_Commons::currency() . number_format($primary_charge, 2) ?></span></div>
-                        <?php if ($vat_charge > 0): ?>
-                            <div class="flex justify-between text-xs mt-1"><span>B. VAT (10%)</span><span class="font-medium"><?= KIT_Commons::currency() . number_format($vat_charge, 2) ?></span></div>
-                        <?php elseif ($handling_fee > 0): ?>
-                            <div class="flex justify-between text-xs mt-1"><span>B. Handling Fee</span><span class="font-medium"><?= KIT_Commons::currency() . number_format($handling_fee, 2) ?></span></div>
-                        <?php endif; ?>
-                        <div class="flex justify-between text-xs mt-1"><span>C. Misc</span><span class="font-medium"><?= KIT_Commons::currency() . number_format($misc_total, 2) ?></span></div>
-                        <div class="flex justify-between text-xs mt-1"><span>D. Additional</span><span class="font-medium"><?= KIT_Commons::currency() . number_format($additional_charges_display, 2) ?></span></div>
-                        <div class="flex justify-between items-center mt-2 pt-2 border-t">
-                            <span class="text-sm font-semibold">Subtotal (A + B + C + D)</span>
-                            <span class="text-base font-bold"><?= KIT_Commons::currency() . number_format($calculated_total, 2) ?></span>
-                        </div>
-                        <?php if (!$include_vat && isset($waybill['international_price_in_rands']) && floatval($waybill['international_price_in_rands']) > 0): ?>
-                            <div class="flex justify-between text-xs mt-1"><span>International Price (R)</span><span class="font-medium"><?= KIT_Commons::currency() . number_format(floatval($waybill['international_price_in_rands']), 2) ?></span></div>
-                        <?php endif; ?>
-                    </div>
-
-                    <div class="bg-blue-50 border border-blue-300 rounded p-3">
-                        <div class="flex justify-between items-center">
-                            <span class="text-sm font-semibold">Grand Total</span>
-                            <span class="text-lg font-bold text-blue-700"><?= KIT_Commons::displayWaybillTotal($grand_total_display) ?></span>
-                        </div>
-
-                        <div class="mt-2 grid grid-cols-3 gap-2 text-[11px] text-gray-700">
-                            <div>VAT: <strong><?= $include_vat ? 'Yes' : 'No' ?></strong></div>
-                            <div>SAD500: <strong><?= $include_sad500 ? 'Yes' : 'No' ?></strong></div>
-                            <div>SADC: <strong><?= $include_sadc ? 'Yes' : 'No' ?></strong></div>
-                        </div>
-                    </div>
-                </div>
-            </div>
-        </div>
-    <?php endif; ?>
-
-    <!-- BASIC WAYBILL INFORMATION -->
-    <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4 md:gap-6 mb-4 md:mb-6">
-        <!-- Document Information -->
-        <div class="border border-gray-200 rounded-lg p-3 md:p-4 overflow-x-hidden md:overflow-x-auto">
-            <h3 class="text-sm font-semibold text-gray-900 mb-4 border-b border-gray-100 pb-2">Document Information</h3>
-            <div class="space-y-3">
-                <div class="flex justify-between items-center">
-                    <span class="text-sm text-gray-700">Waybill Number</span>
-                    <span class="text-sm font-semibold text-gray-900">
-                        <?= htmlspecialchars($waybill['waybill_no'] ?? 'N/A') ?>
-                    </span>
-                </div>
-                <div class="flex justify-between items-center">
-                    <span class="text-sm text-gray-700">Tracking Number</span>
-                    <span class="text-sm font-semibold text-gray-900">
-                        <?= htmlspecialchars($waybill['tracking_number'] ?? 'N/A') ?>
-                    </span>
-                </div>
-                <div class="flex justify-between items-center">
-                    <span class="text-sm text-gray-700">Invoice Number</span>
-                    <span class="text-sm font-semibold text-gray-900">
-                        <?= htmlspecialchars($waybill['product_invoice_number'] ?? 'N/A') ?>
-                    </span>
-                </div>
-            </div>
-        </div>
-
-        <!-- Customer Information -->
-        <div class="border border-gray-200 rounded-lg p-3 md:p-4">
-            <h3 class="text-sm font-semibold text-gray-900 mb-4 border-b border-gray-100 pb-2">Customer Information</h3>
-            <div class="space-y-3">
-                <div class="flex justify-between items-center">
-                    <span class="text-sm text-gray-700">Name</span>
-                    <span class="text-sm font-semibold text-gray-900">
-                        <?= htmlspecialchars($waybill['customer_name'] ?? 'N/A') ?>
-                    </span>
-                </div>
-                <div class="flex justify-between items-center">
-                    <span class="text-sm text-gray-700">Surname</span>
-                    <span class="text-sm font-semibold text-gray-900">
-                        <?= htmlspecialchars($waybill['customer_surname'] ?? 'N/A') ?>
-                    </span>
-                </div>
-                <div class="flex justify-between items-center">
-                    <span class="text-sm text-gray-700">Contact</span>
-                    <span class="text-sm font-semibold text-gray-900">
-                        <?= htmlspecialchars($waybill['cell'] ?? 'N/A') ?>
-                    </span>
-                </div>
-                <div class="flex justify-between items-center">
-                    <span class="text-sm text-gray-700">Email</span>
-                    <span class="text-sm font-semibold text-gray-900">
-                        <?= htmlspecialchars($waybill['email_address'] ?? 'N/A') ?>
-                    </span>
-                </div>
-            </div>
-        </div>
-
-        <!-- Shipment Details -->
-        <div class="border border-gray-200 rounded-lg p-3 md:p-4">
-            <h3 class="text-sm font-semibold text-gray-900 mb-4 border-b border-gray-100 pb-2">Shipment Details</h3>
-            <div class="space-y-3">
-                <div class="flex justify-between items-center">
-                    <span class="text-sm text-gray-700">Origin</span>
-                    <span class="text-sm font-semibold text-gray-900">
-                        <?php
-                        echo htmlspecialchars($originCountryName ?? 'N/A') . "," .
-                            htmlspecialchars($originCityName ?? 'N/A');
-                        ?>
-                    </span>
-                </div>
-                <div class="flex justify-between items-center">
-                    <span class="text-sm text-gray-700">Destination</span>
-                    <span class="text-sm font-semibold text-gray-900">
-                        <?php
-                        echo htmlspecialchars($destinationCountryName ?? 'N/A') . "," .
-                            htmlspecialchars($destinationCityName ?? 'N/A');
-                        ?>
-                    </span>
-                </div>
-                <div class="flex justify-between items-center">
-                    <span class="text-sm text-gray-700">Dimensions</span>
-                    <span class="text-sm font-semibold text-gray-900">
-                        <?php
-                        $len = isset($waybill['item_length']) && $waybill['item_length'] !== '' ? floatval($waybill['item_length']) : 0;
-                        $wid = isset($waybill['item_width']) && $waybill['item_width'] !== '' ? floatval($waybill['item_width']) : 0;
-                        $hei = isset($waybill['item_height']) && $waybill['item_height'] !== '' ? floatval($waybill['item_height']) : 0;
-                        echo number_format($len, 2) . ' × ' . number_format($wid, 2) . ' × ' . number_format($hei, 2) . ' cm';
-                        ?>
-                    </span>
-                </div>
-                <div class="flex justify-between items-center">
-                    <span class="text-sm text-gray-700">Total Mass</span>
-                    <span class="text-sm font-semibold text-gray-900">
-                        <?= htmlspecialchars($waybill['total_mass_kg'] ?? '0') ?> kg
-                    </span>
-                </div>
-                <?php
-                $volume_val = isset($waybill['total_volume']) ? floatval($waybill['total_volume']) : 0.0;
-                if ($volume_val <= 0 && !empty($waybill['miscellaneous'])) {
-                    $maybe_misc = maybe_unserialize($waybill['miscellaneous']);
-                    if (is_array($maybe_misc) && isset($maybe_misc['others']['total_volume'])) {
-                        $volume_val = floatval($maybe_misc['others']['total_volume']);
-                    }
-                }
-                $has_any_volume = $volume_val > 0;
-                if ($has_any_volume): ?>
-                    <div class="flex justify-between items-center">
-                        <span class="text-sm text-gray-700">Total Volume</span>
-                        <span class="text-sm font-semibold text-gray-900">
-                            <?= number_format($volume_val, 3) ?> m³
-                        </span>
-                    </div>
-                <?php endif; ?>
-            </div>
-        </div>
-    </div>
-
-    <div class="grid grid-cols-1 lg:grid-cols-2 gap-4 waybill-items-container">
-        <div class="min-w-0">
-            <div class="border border-gray-200 rounded-lg p-3 md:p-4">
-                <h3 class="text-sm font-semibold text-gray-900 mb-4 border-b border-gray-100 pb-2">Parcels</h3>
-                <div class="overflow-x-auto">
-                    <?php
-                    echo KIT_Commons::waybillTrackAndData($waybill['items']);
-                    ?>
-                </div>
-            </div>
-        </div>
-        <!-- Miscellaneous Items Section -->
-        <div class="min-w-0">
-            <div class="border border-gray-200 rounded-lg p-3 md:p-4">
-                <h3 class="text-sm font-semibold text-gray-900 mb-4 border-b border-gray-100 pb-2">Miscellaneous Items</h3>
-                <?php
-                $misc_data = null;
-                if (!empty($waybill['miscellaneous'])) {
-                    $misc_data = maybe_unserialize($waybill['miscellaneous']);
-                }
-
-                if (!empty($misc_data) && isset($misc_data['misc_items']) && !empty($misc_data['misc_items'])):
-                    // Use getMiscCharges to process the misc data
-                    $misc_total = 0;
-
-                    // Convert the stored format to the format expected by getMiscCharges
-                    $misc_data_for_processing = [
-                        'misc_item' => [],
-                        'misc_price' => [],
-                        'misc_quantity' => []
-                    ];
-
-                    foreach ($misc_data['misc_items'] as $item) {
-                        $misc_data_for_processing['misc_item'][] = $item['misc_item'];
-                        $misc_data_for_processing['misc_price'][] = $item['misc_price'];
-                        $misc_data_for_processing['misc_quantity'][] = $item['misc_quantity'];
-                    }
-
-                    $misc_result = self::getMiscCharges($misc_data_for_processing, []);
-                    $misc_total = floatval($misc_result->misc_total);
-                ?>
-                    <div class="overflow-x-auto min-w-0">
-                        <table class="<?= KIT_Commons::tableClasses(); ?> w-full min-w-full">
-                            <thead>
-                                <tr class="bg-gray-100">
-                                    <th class="<?= KIT_Commons::thClasses() ?> text-left whitespace-nowrap">Description</th>
-                                    <th class="<?= KIT_Commons::thClasses() ?> text-center whitespace-nowrap">Price</th>
-                                    <th class="<?= KIT_Commons::thClasses() ?> text-center whitespace-nowrap">Qty</th>
-                                    <th class="<?= KIT_Commons::thClasses() ?> text-right whitespace-nowrap">Subtotal</th>
-                                </tr>
-                            </thead>
-                            <tbody class="<?= KIT_Commons::tbodyClasses() ?>">
-                                <?php $temTotal = 0;
-
-                                foreach ($misc_data['misc_items'] as $key => $item): ?>
-                                    <tr class="border-t border-gray-100">
-
-                                        <td class="<?= KIT_Commons::tcolClasses() ?> break-words">
-                                            <?= htmlspecialchars($item['misc_item']) ?></td>
-                                        <td class="<?= KIT_Commons::tcolClasses() ?> text-center whitespace-nowrap"><?= KIT_Commons::currency() ?>
-                                            <?= number_format($item['misc_price'], 2) ?></td>
-                                        <td class="<?= KIT_Commons::tcolClasses() ?> text-center whitespace-nowrap"><?= intval($item['misc_quantity']) ?>
-                                        </td>
-                                        <td class="<?= KIT_Commons::tcolClasses() ?> text-right whitespace-nowrap">
-                                            <?= KIT_Commons::currency() ?>
-                                            <?= number_format($item['misc_price'] * $item['misc_quantity'], 2) ?>
-                                        </td>
-                                    </tr>
-                                    <?php $temTotal += $item['misc_price'] * $item['misc_quantity']; ?>
-                                <?php endforeach; ?>
-                                <tr class="border-t border-gray-100">
-                                    <td colspan="3" class="<?= KIT_Commons::tcolClasses() ?> text-right font-semibold whitespace-nowrap">
-                                        Total</td>
-                                    <td class="<?= KIT_Commons::tcolClasses() ?> font-bold whitespace-nowrap">
-                                        <?= KIT_Commons::currency() ?> <?= number_format($misc_total, 2) ?>
-                                    </td>
-                                </tr>
-                            </tbody>
-                        </table>
-                    </div>
-                <?php else: ?>
-                    <p class="text-gray-600">No Misc Items</p>
-                <?php endif; ?>
-            </div>
-        </div>
-    </div>
-
-    <!-- Notes Section -->
-    <?php if ($waybill['approval'] === 'pending') : ?>
-        <div class="bg-yellow-50 border-l-4 border-yellow-400 p-4 mb-6">
-            <div class="flex flex-row items-start">
-                <div class="flex-shrink-0">
-                    <svg class="h-5 w-5 text-yellow-400" fill="currentColor" viewBox="0 0 20 20">
-                        <path fill-rule="evenodd"
-                            d="M8.257 3.099c.765-1.36 2.722-1.36 3.486 0l5.58 9.92c.75 1.334-.213 2.98-1.742 2.98H4.42c-1.53 0-2.493-1.646-1.743-2.98l5.58-9.92zM11 13a1 1 0 11-2 0 1 1 0 012 0zm-1-8a1 1 0 00-1 1v3a1 1 0 002 0V6a1 1 0 00-1-1z"
-                            clip-rule="evenodd"></path>
-                    </svg>
-                </div>
-                <div class="ml-3">
-                    <h3 class="text-xs font-medium text-yellow-800">Approval Required</h3>
-                    <div class="mt-2 text-xs text-yellow-700">
-                        <p>This waybill is pending manager approval before processing.</p>
-                    </div>
-                </div>
-            </div>
-        </div>
-    <?php endif; ?>
-    <div class="flex justify-end gap-3 border-t pt-4">
-        <?php if (KIT_User_Roles::can_edit_approved_waybill($waybill['approval'] ?? 'pending')): ?>
-            <div class="waybill-action-btn-wrap inline-flex shrink-0">
-                <?= KIT_Commons::renderButton(
-                    'Edit',
-                    'primary',
-                    'md',
-                    [
-                        'href' => '?page=08600-Waybill-view&waybill_id=' . (int) $waybill['id'] . '&edit=true',
-                        'gradient' => true,
-                        'icon' => '<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M11 5H6a2 2 0 00-2 2v11a2 2 0 002 2h11a2 2 0 002-2v-5m-1.414-9.414a2 2 0 112.828 2.828L11.828 15H9v-2.828l8.586-8.586z"></path>',
-                        'iconPosition' => 'left',
-                    ]
-                ); ?>
-            </div>
-        <?php elseif (($waybill['approval'] ?? 'pending') === 'approved' || ($waybill['approval'] ?? 'pending') === 1): ?>
-            <div class="waybill-action-btn-wrap inline-flex shrink-0">
-                <?= KIT_Commons::renderButton(
-                    'Edit Waybill (Locked)',
-                    'secondary',
-                    'md',
-                    [
-                        'type' => 'button',
-                        'disabled' => true,
-                        'title' => 'Waybill is approved and locked for editing. Only administrators can edit approved waybills.',
-                        'icon' => '<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 15v2m-6 4h12a2 2 0 002-2v-6a2 2 0 00-2-2H6a2 2 0 00-2 2v6a2 2 0 002 2zm10-10V7a2 2 0 00-2-2H4a2 2 0 00-2 2v4h8z"></path>',
-                        'iconPosition' => 'left',
-                    ]
-                ); ?>
-            </div>
-        <?php endif; ?>
-
-    </div>
-</div>
-<?php
-// Ensure WordPress functions are available
-if (!function_exists('admin_url')) {
-    function admin_url($path = '')
-    {
-        return $path;
+    wp_enqueue_style(
+        'kit-waybill-print',
+        COURIER_FINANCE_PLUGIN_URL . 'assets/css/kit-waybill-print.css',
+        $kit_view_template_id === 'view_waybill_template2' ? ['kit-waybill-template2'] : [],
+        '1.0.0'
+    );
+    if (function_exists('wp_print_styles')) {
+        $print_handles = ['kit-waybill-print'];
+        if ($kit_view_template_id === 'view_waybill_template2') {
+            array_unshift($print_handles, 'kit-waybill-template2');
+        }
+        wp_print_styles($print_handles);
     }
 }
-if (!function_exists('wp_create_nonce')) {
-    function wp_create_nonce($action = '')
-    {
-        return '';
-    }
-}
-if (!function_exists('maybe_unserialize')) {
-    function maybe_unserialize($original)
-    {
-        if (is_serialized($original)) {
-            return unserialize($original);
-        }
-        return $original;
-    }
-    function is_serialized($data)
-    {
-        // If it isn't a string, it isn't serialized
-        if (!is_string($data)) {
-            return false;
-        }
-        $data = trim($data);
-        if ('N;' == $data) return true;
-        if (!preg_match('/^([adObis]):/', $data, $badions)) return false;
-        switch ($badions[1]) {
-            case 'a':
-            case 'O':
-            case 's':
-                if (preg_match("/^{$badions[1]}:[0-9]+:/s", $data)) return true;
-                break;
-            case 'b':
-            case 'i':
-            case 'd':
-                if (preg_match("/^{$badions[1]}:[0-9.E-]+;$/", $data)) return true;
-                break;
-        }
-        return false;
-    }
-}
-?>
 
-<script>
-    document.addEventListener('DOMContentLoaded', function() {
-        // Auto-hide success/error messages after 10 seconds
-        const messages = [
-            'approval-success-message',
-            'invoice-status-message',
-            'approval-error-message',
-            'assignment-success-message',
-            'assignment-error-message'
-        ];
+kit_edit_waybill_render_switcher($kit_edit_template_id);
 
-        messages.forEach(function(messageId) {
-            const message = document.getElementById(messageId);
-            if (message) {
-                setTimeout(function() {
-                    message.style.transition = 'opacity 0.5s ease-out';
-                    message.style.opacity = '0';
-                    setTimeout(function() {
-                        message.remove();
-                    }, 500); // Wait for fade out animation
-                }, 10000); // 10 seconds
-            }
-        });
-    });
-</script>
+// Rendered here rather than inside a template so both layouts always surface a
+// totals disagreement identically.
+if (!$totals_match && class_exists('KIT_User_Roles') && KIT_User_Roles::can_see_prices()) : ?>
+    <div class="bg-yellow-50 border border-yellow-400 border-l-4 p-4 mb-4" role="alert">
+        <p class="text-sm font-semibold text-yellow-800">Totals do not agree</p>
+        <p class="text-sm text-yellow-700 mt-1">
+            The stored invoice amount is <strong><?= esc_html(KIT_Commons::money($totals_stored_total)) ?></strong>,
+            but recalculating this waybill's charges gives <strong><?= esc_html(KIT_Commons::money($totals_calculated_total)) ?></strong>
+            (a difference of <strong><?= esc_html(KIT_Commons::money(abs($totals_difference))) ?></strong>).
+            Figures below show the recalculated amount. Save this waybill to bring the stored amount in line.
+        </p>
+    </div>
+<?php endif;
 
-<script>
-// #region agent log
-(function () {
-    document.addEventListener('DOMContentLoaded', function () {
-        try {
-            const payload = {
-                sessionId: '6b2840',
-                runId: 'post-fix',
-                hypothesisId: 'H1-H5',
-                location: 'includes/components/viewWaybill.php:client-beacon',
-                message: 'Client beacon for VAT summary',
-                data: {
-                    waybill_no: <?php echo json_encode((int)($waybill_no ?? 0)); ?>,
-                    include_vat: <?php echo json_encode((bool)($include_vat ?? false)); ?>,
-                    vat_charge_final: <?php echo json_encode((float)($vat_charge ?? 0)); ?>,
-                    primary_charge: <?php echo json_encode((float)($primary_charge ?? 0)); ?>,
-                    waybill_items_total: <?php echo json_encode((float)($waybill_items_total ?? 0)); ?>,
-                    calculated_total: <?php echo json_encode((float)($calculated_total ?? 0)); ?>,
-                    stored_total: <?php echo json_encode((float)($stored_total ?? 0)); ?>,
-                    totals_match: <?php echo json_encode((bool)($totals_match ?? false)); ?>
-                },
-                timestamp: Date.now()
-            };
-            fetch('http://127.0.0.1:63332/ingest/2aae1a1f-38bb-43d8-82c7-ca359c71f068', {
-                method: 'POST',
-                headers: {
-                    'Content-Type': 'application/json',
-                    'X-Debug-Session-Id': '6b2840'
-                },
-                body: JSON.stringify(payload)
-            }).catch(function () {});
-        } catch (e) {}
-    });
-})();
-// #endregion
-</script>
+require $kit_view_template_path;

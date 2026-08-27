@@ -53,7 +53,7 @@ if ($smalling_enabled) {
 
 ?>
 
-<div class="<?php echo $class; ?> bg-white rounded-lg border border-gray-200 p-4 mb-4">
+<div class="<?php echo $class; ?> bg-white rounded-lg border border-gray-200 p-4">
     <div class="items-center justify-between mb-3">
         <h3 class="text-lg font-semibold text-gray-800 flex items-center gap-2">
             <svg class="w-5 h-5 text-orange-500" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -63,11 +63,17 @@ if ($smalling_enabled) {
         </h3>
         <div class="flex items-center gap-2 mt-2">
             <label class="inline-flex items-center">
-                <input type="checkbox" 
-                       id="enable_total_override" 
-                       name="enable_total_override" 
-                       class="form-checkbox h-4 w-4 text-orange-600 focus:ring-orange-500 border-gray-300 rounded"
-                       onchange="toggleTotalOverride(this.checked)">
+                <?php
+                echo KIT_Commons::Lcheckbox([
+                    'no_label' => true,
+                    'label' => '',
+                    'id' => 'enable_total_override',
+                    'name' => 'enable_total_override',
+                    'value' => '1',
+                    'class' => 'form-checkbox h-4 w-4 text-orange-600 focus:ring-orange-500 border-gray-300 rounded',
+                    'special' => 'onchange="toggleTotalOverride(this.checked)"',
+                ]);
+                ?>
                 <span class="ml-2 text-sm font-medium text-gray-700">Override Total</span>
             </label>
         </div>
@@ -85,27 +91,25 @@ if ($smalling_enabled) {
                     <option value="volume">Volume</option>
                 </select>
             </div>
-           <!--  <div>
-                <label for="calculated_total" class="block text-sm font-medium text-gray-700 mb-1">
-                    Calculated Total (R)
-                </label>
-                <input type="text" 
-                       id="calculated_total" 
-                       name="calculated_total" 
-                       class="w-full px-3 py-2 border border-gray-300 rounded-md bg-gray-50 text-gray-600" 
-                       readonly>
-            </div> -->
+            <!-- Calculated total (readonly) field removed from UI; use Linput if re-enabled. -->
             <div>
                 <label for="override_total" class="block text-sm font-medium text-gray-700 mb-1">
                     Override Total (R) <span class="text-red-500">*</span>
                 </label>
-                <input type="number" 
-                       id="override_total" 
-                       name="override_total" 
-                       step="0.01" 
-                       min="0"
-                       class="w-full px-3 py-2 border border-orange-300 rounded-md focus:outline-none focus:ring-2 focus:ring-orange-500 focus:border-orange-500"
-                       placeholder="0.00">
+                <?php
+                echo KIT_Commons::Lnumber([
+                    'no_label' => true,
+                    'label' => '',
+                    'id' => 'override_total',
+                    'name' => 'override_total',
+                    'step' => '0.01',
+                    'min' => '0',
+                    'value' => '',
+                    'placeholder' => '0.00',
+                    'preset' => '',
+                    'class' => 'w-full px-3 py-2 border border-orange-300 rounded-md focus:outline-none focus:ring-2 focus:ring-orange-500 focus:border-orange-500',
+                ]);
+                ?>
             </div>
         </div>
         

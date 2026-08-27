@@ -91,12 +91,12 @@ class KIT_Modal
             // --- Bootstrap 5 (frontend / employee dashboard) ---
             if ($show_button) {
                 $button_label = $button_text ?: $title;
-                echo KIT_Commons::kitButton([
-                    'color'         => 'blue',
+                //otherz
+                echo KIT_Commons::renderButton($button_label, 'primary', 'lg', [
                     'data-bs-toggle' => 'modal',
                     'data-bs-target' => '#' . $id,
-                    'icon'           => 'plus',
-                ], $button_label);
+                    'icon'           => '<path fill-rule="evenodd" d="M10 5a1 1 0 011 1v3h3a1 1 0 110 2h-3v3a1 1 0 11-2 0v-3H6a1 1 0 110-2h3V6a1 1 0 011-1z" clip-rule="evenodd" />',
+                ]);
             }
             ?>
             <div id="<?php echo esc_attr($id); ?>" class="modal fade" tabindex="-1" aria-labelledby="<?php echo esc_attr($id); ?>-label" aria-hidden="true">
@@ -188,11 +188,10 @@ class KIT_Modal
 
         if ($show_button) {
             $button_label = $button_text ?: $title;
-            echo KIT_Commons::kitButton([
-                'color' => 'blue',
+            echo KIT_Commons::renderButton($button_label, 'primary', 'lg', [
                 'modal' => $id,
-                'icon'  => 'plus',
-            ], $button_label);
+                'icon'  => '<path fill-rule="evenodd" d="M10 5a1 1 0 011 1v3h3a1 1 0 110 2h-3v3a1 1 0 11-2 0v-3H6a1 1 0 110-2h3V6a1 1 0 011-1z" clip-rule="evenodd" />',
+            ]);
         }
         ?>
         <div id="<?php echo esc_attr($id); ?>"

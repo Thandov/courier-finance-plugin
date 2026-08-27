@@ -1,5 +1,11 @@
-<?php if (!defined('ABSPATH')) { exit; }
- ?>
+<?php
+if (!defined('ABSPATH')) {
+    exit;
+}
+
+// Customer fields on this step are rendered only via `kit_render_customers_form_fields()` in `includes/customers/_customersForm.php` (through `customerSelection.php`). Do not duplicate customer field markup here.
+require_once COURIER_FINANCE_PLUGIN_PATH . 'includes/customers/_customersForm.php';
+?>
 <div class="space-y-4 md:space-y-0 md:grid md:grid-cols-2 md:gap-6">
     <div class="space-y-4 bg-white shadow rounded-lg p-3 md:p-6">
         <div class="md:bg-white rounded-lg">
@@ -21,7 +27,7 @@
                     'id'    => 'waybill_no',
                     'type'  => 'text',
                     'value' => esc_attr($waybill->waybill_no ?? KIT_Waybills::generate_waybill_number()),
-                    'class' => 'w-full px-3 py-2 border border-gray-300 rounded-md bg-gray-50 focus:outline-none focus:ring-1 focus:ring-blue-500',
+                    'preset' => 'readonly_field',
                     'special' => 'readonly',
                 ]);
                 ?>
@@ -32,7 +38,11 @@
                         'name'  => 'waybill_description',
                         'id'    => 'waybill_description',
                         'type'  => 'textarea',
-                        'value' => esc_attr($waybill->waybill_description ?? ''),
+                        'value' => esc_attr(
+                            (is_object($waybill) ? ($waybill->waybill_description ?? '') : '')
+                            ?: (is_array($waybill) ? ($waybill['waybill_description'] ?? '') : '')
+                            ?: ($GLOBALS['kit_booking_waybill_notes'] ?? '')
+                        ),
                     ]);
                     ?>
                 </div>
@@ -52,7 +62,7 @@
 
     <!-- Navigation Buttons -->
     <div class="flex justify-between mt-8">
-        <?php echo KIT_Commons::renderButton('Next: Waybill Details', 'primary', 'lg', [
+        <?php echo KIT_Commons::renderButton('Next: Delivery & Destination', 'primary', 'lg', [
             'icon' => '<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 7l5 5m0 0l-5 5m5-5H6" />',
             'iconPosition' => 'right',
             'data-target' => 'step-2',

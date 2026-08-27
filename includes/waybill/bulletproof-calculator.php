@@ -212,7 +212,11 @@ class KIT_Bulletproof_Calculator
      */
     private static function calculate_vat($base_amount)
     {
-        $vat_rate = 0.10; // 10%
+        $vat_rate = 0.10;
+        if (class_exists('KIT_Waybills') && method_exists('KIT_Waybills', 'vatRate')) {
+            $pct = floatval(KIT_Waybills::vatRate());
+            $vat_rate = $pct > 1 ? $pct / 100.0 : $pct;
+        }
         return $base_amount * $vat_rate;
     }
     

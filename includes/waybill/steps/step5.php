@@ -2,10 +2,10 @@
 <div class="bg-white p-6">
     <?= KIT_Commons::prettyHeading([
         'icon' => '<path d="M16 7a4 4 0 1 0-8 0v2a4 4 0 0 0 8 0V7z" /><path d="M12 19v-2m0 0a7 7 0 0 1-7-7V7a7 7 0 0 1 14 0v3a7 7 0 0 1-7 7z" />',
-        'words' => 'Waybill Details'
+        'words' => 'Charges & Fees'
     ]) ?>
     <p class="text-xs text-gray-600 mb-6">
-        Add charge details for the waybill.
+        Enter mass and volume charges. Wait for rates to finish before continuing.
     </p>
 
     <!-- Waybill section -->
@@ -16,6 +16,22 @@
         ?>
     </div>
 
+    <div id="kit-charge-rate-status" class="mt-4 hidden rounded-md border border-amber-300 bg-amber-50 px-4 py-3 text-sm text-amber-900" role="status" aria-live="polite"></div>
+
+    <!-- Optional miscellaneous items (was its own forced step) -->
+    <details id="kit-misc-accordion" class="mt-8 rounded-lg border border-gray-200 bg-gray-50 open:bg-white">
+        <summary class="cursor-pointer list-none px-4 py-3 text-sm font-semibold text-gray-800 flex items-center justify-between">
+            <span>Miscellaneous items <span class="font-normal text-gray-500">(optional)</span></span>
+            <span class="text-xs font-normal text-gray-500">Add only if needed</span>
+        </summary>
+        <div class="border-t border-gray-200 px-2 pb-4" id="waybill-misc-sections-container">
+            <?php
+            $waybill_index = 0;
+            require COURIER_FINANCE_PLUGIN_PATH . 'includes/components/waybillMiscSection.php';
+            ?>
+        </div>
+    </details>
+
     <!-- Navigation Buttons -->
     <div class="flex justify-between mt-8">
         <?php echo KIT_Commons::renderButton('Back', 'secondary', 'lg', [
@@ -24,10 +40,11 @@
             'data-target' => 'step-2',
             'classes' => 'prev-step'
         ]); ?>
-        <?php echo KIT_Commons::renderButton('Next: Miscellaneous Items', 'primary', 'lg', [
+        <?php echo KIT_Commons::renderButton('Next: Parcels & Review', 'primary', 'lg', [
+            'id' => 'kit-charges-next-btn',
             'icon' => '<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 7l5 5m0 0l-5 5m5-5H6" />',
             'iconPosition' => 'right',
-            'data-target' => 'step-4',
+            'data-target' => 'step-5',
             'classes' => 'next-step',
             'gradient' => true
         ]); ?>
@@ -41,15 +58,147 @@ document.addEventListener('DOMContentLoaded', function() {
         window.waybillCount = 1;
     }
 
+    function parseMoney(value) {
+        if (value === null || value === undefined || value === '') return 0;
+        var n = parseFloat(String(value).replace(/,/g, '.').replace(/[^\d.-]/g, ''));
+        return Number.isFinite(n) ? n : 0;
+    }
+
+    function formatRand(amount) {
+        return 'R ' + (Number.isFinite(amount) ? amount : 0).toFixed(2);
+    }
+
+    function selectedChargeBasis() {
+        var checked = document.querySelector('input[name="charge_basis"]:checked');
+        return checked ? String(checked.value || 'auto').toLowerCase() : 'auto';
+    }
+
+    function billedFreightFromCharges() {
+        var mass = parseMoney(document.getElementById('mass_charge') && document.getElementById('mass_charge').value);
+        var volume = parseMoney(document.getElementById('volume_charge') && document.getElementById('volume_charge').value);
+        var basis = selectedChargeBasis();
+        if (basis === 'mass' || basis === 'weight') return mass;
+        if (basis === 'volume') return volume;
+        return Math.max(mass, volume);
+    }
+
+    function updateBilledFreightDisplay() {
+        var display = document.getElementById('kit-billed-freight-display');
+        var hint = document.getElementById('kit-billed-freight-hint');
+        if (!display) return;
+        var mass = parseMoney(document.getElementById('mass_charge') && document.getElementById('mass_charge').value);
+        var volume = parseMoney(document.getElementById('volume_charge') && document.getElementById('volume_charge').value);
+        var billed = billedFreightFromCharges();
+        var basis = selectedChargeBasis();
+        display.textContent = formatRand(billed);
+        if (hint) {
+            if (mass <= 0 && volume <= 0) {
+                hint.textContent = 'Enter mass or volume to calculate.';
+            } else if (basis === 'auto') {
+                hint.textContent = 'Auto: higher of mass (' + formatRand(mass) + ') and volume (' + formatRand(volume) + ').';
+            } else if (basis === 'mass' || basis === 'weight') {
+                hint.textContent = 'Billing mass charge.';
+            } else {
+                hint.textContent = 'Billing volume charge.';
+            }
+        }
+    }
+
+    function isRateLoading() {
+        if (typeof window.kitClearOrphanRateLoaders === 'function') {
+            window.kitClearOrphanRateLoaders();
+        }
+        var massInput = document.getElementById('total_mass_kg');
+        if (massInput && massInput.classList.contains('loading')) return true;
+        // Volume field id is volume_rate_per_m3 (not volume_rate).
+        if (document.querySelector('#mass_rate.kit-input-loading, #mass_charge.kit-input-loading, #volume_rate_per_m3.kit-input-loading, #volume_charge.kit-input-loading, .kit-input-loading')) {
+            return true;
+        }
+        return false;
+    }
+
+    function chargesReadyToContinue() {
+        var status = document.getElementById('kit-charge-rate-status');
+        var nextBtn = document.getElementById('kit-charges-next-btn');
+        var massKg = parseMoney(document.getElementById('total_mass_kg') && document.getElementById('total_mass_kg').value);
+        var volume = parseMoney(document.getElementById('total_volume') && document.getElementById('total_volume').value);
+        var massCharge = parseMoney(document.getElementById('mass_charge') && document.getElementById('mass_charge').value);
+        var volumeCharge = parseMoney(document.getElementById('volume_charge') && document.getElementById('volume_charge').value);
+        var overrideOn = !!(document.getElementById('enable_total_override') && document.getElementById('enable_total_override').checked);
+        var overrideTotal = parseMoney(document.getElementById('override_total') && document.getElementById('override_total').value);
+        // If charges already resolved, never block on a stuck spinner overlay.
+        if ((massKg <= 0 || massCharge > 0) && (volume <= 0 || volumeCharge > 0)) {
+            if (typeof window.kitClearOrphanRateLoaders === 'function') {
+                window.kitClearOrphanRateLoaders();
+            }
+        }
+        var loading = isRateLoading();
+        var message = '';
+        var ok = true;
+
+        if (loading && !((massKg <= 0 || massCharge > 0) && (volume <= 0 || volumeCharge > 0))) {
+            ok = false;
+            message = 'Rates are still calculating. Please wait…';
+        } else if (overrideOn) {
+            if (overrideTotal <= 0) {
+                ok = false;
+                message = 'Override is enabled — enter an override total, or turn override off.';
+            }
+        } else if (massKg > 0 && massCharge <= 0) {
+            ok = false;
+            message = 'Mass was entered but the rate has not resolved. Wait for the rate, or use Override Total.';
+        } else if (volume > 0 && volumeCharge <= 0 && massKg <= 0) {
+            ok = false;
+            message = 'Volume was entered but the volume charge is still R0.00. Wait for the rate, or use Override Total.';
+        }
+
+        if (status) {
+            if (!ok && message) {
+                status.textContent = message;
+                status.classList.remove('hidden');
+            } else {
+                status.textContent = '';
+                status.classList.add('hidden');
+            }
+        }
+
+        if (nextBtn) {
+            nextBtn.disabled = !ok;
+            nextBtn.classList.toggle('opacity-50', !ok);
+            nextBtn.classList.toggle('cursor-not-allowed', !ok);
+            nextBtn.classList.toggle('pointer-events-none', !ok);
+        }
+
+        updateBilledFreightDisplay();
+        return ok;
+    }
+
+    window.kitChargesReadyToContinue = chargesReadyToContinue;
+    window.kitUpdateBilledFreightDisplay = updateBilledFreightDisplay;
+
+    ['total_mass_kg', 'mass_rate', 'mass_charge', 'total_volume', 'volume_charge', 'volume_rate_per_m3', 'override_total', 'enable_total_override'].forEach(function(id) {
+        var el = document.getElementById(id);
+        if (!el) return;
+        el.addEventListener('input', chargesReadyToContinue);
+        el.addEventListener('change', chargesReadyToContinue);
+    });
+    document.querySelectorAll('input[name="charge_basis"]').forEach(function(el) {
+        el.addEventListener('change', chargesReadyToContinue);
+    });
+
+    // Re-check while loaders may be active
+    setInterval(function() {
+        var step = document.getElementById('step-3');
+        if (step && !step.classList.contains('hidden')) {
+            chargesReadyToContinue();
+        }
+    }, 400);
+
+    chargesReadyToContinue();
+
     /**
-     * Step 5 "different city" handling for parcel waybills.
-     *
-     * Requirements:
-     * - NEVER touch the global delivery selection from Step 4:
-     *   #direction_id and #selected_delivery_id must remain unchanged.
-     * - Per‑waybill city changes only update that waybill's hidden
-     *   destination_country / destination_city / delivery_id / direction_id
-     *   fields, which the backend reads from $_POST['waybills'][index].
+     * "Different city" handling for parcel waybills.
+     * NEVER touch global #direction_id / #selected_delivery_id from Step 2.
      */
     try {
         const mainDestinationCountry =
@@ -59,18 +208,11 @@ document.addEventListener('DOMContentLoaded', function() {
 
         const mainDestinationCitySelect = document.getElementById('destination_city');
 
-        /**
-         * Populate a per‑waybill city <select> without triggering any of the
-         * global country->deliveries logic used in Step 4.
-         * This intentionally does NOT call handleCountryChange() and does NOT
-         * modify #direction_id or #selected_delivery_id.
-         */
         function populateWaybillCitySelect(selectEl, countryId, selectedCityId) {
             if (!selectEl) {
                 return;
             }
 
-            // Clear existing options
             selectEl.innerHTML = '';
             const placeholder = document.createElement('option');
             placeholder.value = '';
@@ -93,7 +235,6 @@ document.addEventListener('DOMContentLoaded', function() {
                 return;
             }
 
-            // Fallback: clone options from the main destination_city select (Step 4)
             if (mainDestinationCitySelect && mainDestinationCitySelect.options.length > 0) {
                 Array.prototype.forEach.call(mainDestinationCitySelect.options, function(optSrc) {
                     const opt = document.createElement('option');
@@ -107,7 +248,6 @@ document.addEventListener('DOMContentLoaded', function() {
             }
         }
 
-        // Wire up all "different city?" checkboxes / selects
         document.querySelectorAll('.waybill-section').forEach(function(sectionEl) {
             const index = sectionEl.getAttribute('data-waybill-index');
             if (index === null || typeof index === 'undefined') {
@@ -125,8 +265,6 @@ document.addEventListener('DOMContentLoaded', function() {
                 return;
             }
 
-            // For parcel waybills we always start from the Step 4 delivery,
-            // so copy its country / ids once and keep them stable.
             const globalDeliveryId = document.getElementById('selected_delivery_id')?.value || '';
             const globalDirectionId = document.getElementById('direction_id')?.value || '';
 
@@ -146,12 +284,10 @@ document.addEventListener('DOMContentLoaded', function() {
                     dropdownWrapper.classList.remove('hidden');
                     dropdownWrapper.style.display = '';
 
-                    // Ensure country is set for this waybill
                     if (hiddenCountry && !hiddenCountry.value && mainDestinationCountry) {
                         hiddenCountry.value = mainDestinationCountry;
                     }
 
-                    // Populate city dropdown for this waybill (no side‑effects)
                     populateWaybillCitySelect(
                         citySelect,
                         hiddenCountry ? hiddenCountry.value : mainDestinationCountry,
@@ -160,7 +296,6 @@ document.addEventListener('DOMContentLoaded', function() {
                 } else {
                     dropdownWrapper.classList.add('hidden');
                     dropdownWrapper.style.display = 'none';
-                    // When toggled off, clear only this waybill's override city
                     if (citySelect) {
                         citySelect.value = '';
                     }
@@ -169,26 +304,18 @@ document.addEventListener('DOMContentLoaded', function() {
 
             differentCityCheckbox.addEventListener('change', updateDifferentCityState);
 
-            // When user picks a city for this waybill, just store the value on that
-            // select / hidden fields – do NOT call any global handlers.
             citySelect.addEventListener('change', function() {
                 const selectedValue = citySelect.value || '';
-                // Mirror into hidden destination_city for this waybill; backend
-                // reads waybills[index][destination_city].
                 if (selectedValue && hiddenCountry && !hiddenCountry.value && mainDestinationCountry) {
                     hiddenCountry.value = mainDestinationCountry;
                 }
-
-                // We deliberately do NOT touch #direction_id or #selected_delivery_id here.
             });
 
-            // Initialise UI state on load
             updateDifferentCityState();
         });
     } catch (e) {
-        // Fail-safe: log to console but never break the main waybill flow
         if (window.console && console.error) {
-            console.error('Waybill Step 5 different-city initialisation error:', e);
+            console.error('Waybill charges different-city initialisation error:', e);
         }
     }
 });

@@ -1,0 +1,102 @@
+/* 3-level nest for #toplevel_page_08600-dashboard — inherit WP admin chrome */
+
+#adminmenu #toplevel_page_08600-dashboard .kit-menu-group {
+    position: relative;
+}
+
+#adminmenu #toplevel_page_08600-dashboard .kit-menu-group__toggle {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    width: 100%;
+    margin: 0;
+    padding: 6px 12px;
+    border: 0;
+    background: transparent;
+    /* Match #adminmenu .wp-submenu a — buttons inherit body text (black) otherwise */
+    color: #c3c4c7;
+    font-size: 13px;
+    line-height: 1.4;
+    text-align: left;
+    cursor: pointer;
+    box-sizing: border-box;
+    -webkit-appearance: none;
+    appearance: none;
+}
+
+#adminmenu #toplevel_page_08600-dashboard .kit-menu-group__toggle .dashicons {
+    width: 16px;
+    height: 16px;
+    font-size: 16px;
+    line-height: 16px;
+    opacity: 0.7;
+    transition: transform 0.12s ease;
+}
+
+#adminmenu #toplevel_page_08600-dashboard .kit-menu-group--open > .kit-menu-group__toggle .dashicons,
+#adminmenu #toplevel_page_08600-dashboard .kit-menu-group--current > .kit-menu-group__toggle .dashicons {
+    transform: rotate(90deg);
+}
+
+#adminmenu #toplevel_page_08600-dashboard .kit-menu-group--current > .kit-menu-group__toggle {
+    font-weight: 600;
+    color: #fff;
+}
+
+#adminmenu #toplevel_page_08600-dashboard .kit-menu-group__children {
+    margin: 0;
+    padding: 0;
+    list-style: none;
+}
+
+#adminmenu #toplevel_page_08600-dashboard:not(.kit-menu-mode-flyout) .kit-menu-group:not(.kit-menu-group--open) > .kit-menu-group__children {
+    display: none;
+}
+
+#adminmenu #toplevel_page_08600-dashboard:not(.kit-menu-mode-flyout) .kit-menu-group__children a {
+    padding-left: 20px;
+}
+
+/* Flyout (hover parent or folded sidebar): L3 opens to the right */
+#adminmenu #toplevel_page_08600-dashboard.kit-menu-mode-flyout > .wp-submenu {
+    overflow: visible;
+}
+
+#adminmenu #toplevel_page_08600-dashboard.kit-menu-mode-flyout .kit-menu-group__children {
+    display: none;
+    position: absolute;
+    left: 100%;
+    top: 0;
+    z-index: 10000;
+    min-width: 160px;
+    margin-left: -1px;
+    padding: 0;
+    background: #2c3338;
+    box-shadow: 0 3px 5px rgba(0, 0, 0, 0.2);
+}
+
+#adminmenu #toplevel_page_08600-dashboard.kit-menu-mode-flyout .kit-menu-group:hover > .kit-menu-group__children,
+#adminmenu #toplevel_page_08600-dashboard.kit-menu-mode-flyout .kit-menu-group:focus-within > .kit-menu-group__children {
+    display: block;
+}
+
+#adminmenu #toplevel_page_08600-dashboard.kit-menu-mode-flyout .kit-menu-group:hover > .kit-menu-group__toggle .dashicons,
+#adminmenu #toplevel_page_08600-dashboard.kit-menu-mode-flyout .kit-menu-group:focus-within > .kit-menu-group__toggle .dashicons {
+    transform: none;
+}
+
+#adminmenu #toplevel_page_08600-dashboard.kit-menu-mode-flyout .kit-menu-group__children a {
+    padding-left: 12px;
+}
+
+#adminmenu #toplevel_page_08600-dashboard .kit-menu-group__toggle:hover,
+#adminmenu #toplevel_page_08600-dashboard .kit-menu-group__toggle:focus {
+    color: #72aee6;
+    box-shadow: none;
+    outline: none;
+}
+
+#adminmenu #toplevel_page_08600-dashboard .kit-menu-group__toggle:focus-visible {
+    outline: 1px solid #72aee6;
+    outline-offset: -2px;
+}

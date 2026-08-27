@@ -121,11 +121,45 @@ function plugin_Waybill_list_page()
             }
         }
 
+        if (class_exists('KIT_Bulk_Action_Log')) {
+            KIT_Bulk_Action_Log::record('delete', $tokens, 'waybill', KIT_Bulk_Action_Log::current_context());
+        }
+
         $redirect_url = remove_query_arg(['bulk_deleted', 'bulk_requested']);
         $redirect_url = add_query_arg([
             'bulk_deleted' => $deleted_count,
             'bulk_requested' => count($tokens),
         ], $redirect_url);
+        wp_safe_redirect($redirect_url);
+        exit;
+    }
+
+    if (
+        isset($_POST['bulk_action'], $_POST['bulk_ids'])
+        && sanitize_text_field(wp_unslash($_POST['bulk_action'])) === 'move_to_warehouse'
+    ) {
+        if (!current_user_can('kit_update_data')) {
+            wp_die('Unauthorized');
+        }
+
+        $bulk_nonce = isset($_POST['bulk_nonce']) ? sanitize_text_field(wp_unslash($_POST['bulk_nonce'])) : '';
+        if (empty($bulk_nonce) || !wp_verify_nonce($bulk_nonce, 'bulk_action_nonce')) {
+            wp_die('Invalid bulk action nonce.');
+        }
+
+        $raw_bulk_ids = sanitize_text_field(wp_unslash($_POST['bulk_ids']));
+        $tokens = array_values(array_unique(array_filter(array_map('trim', explode(',', $raw_bulk_ids)))));
+
+        if (!class_exists('KIT_Warehouse')) {
+            require_once plugin_dir_path(__FILE__) . 'warehouse/warehouse-functions.php';
+        }
+        $moved = KIT_Warehouse::moveWaybillsToWarehouse($tokens);
+        if (class_exists('KIT_Bulk_Action_Log')) {
+            KIT_Bulk_Action_Log::record('move_to_warehouse', $tokens, 'waybill', KIT_Bulk_Action_Log::current_context());
+        }
+
+        $redirect_url = remove_query_arg(['warehouse_moved', 'bulk_deleted', 'bulk_requested']);
+        $redirect_url = add_query_arg(['warehouse_moved' => $moved], $redirect_url);
         wp_safe_redirect($redirect_url);
         exit;
     }
@@ -161,6 +195,23 @@ function plugin_Waybill_list_page()
         KIT_Toast::ensure_toast_loads();
         echo KIT_Toast::error('KIT_Unified_Table class not found. Please check the logs.', 'Error');
         return;
+    }
+
+    if (isset($_GET['warehouse_moved'])) {
+        if (!class_exists('KIT_Toast')) {
+            require_once plugin_dir_path(__FILE__) . 'components/toast.php';
+        }
+        KIT_Toast::ensure_toast_loads();
+        $moved = max(0, (int) $_GET['warehouse_moved']);
+        if ($moved > 0) {
+            echo KIT_Toast::success(
+                sprintf(
+                    _n('%d waybill moved to warehouse.', '%d waybills moved to warehouse.', $moved, '08600-services-quotations'),
+                    $moved
+                ),
+                'Success'
+            );
+        }
     }
 
     // Warehouse database updates and simulations no longer needed - using kit_waybills table directly
@@ -240,16 +291,19 @@ function plugin_Waybill_list_page()
         }
         // Treat "Private" as a placeholder company label, not a preferred business display.
         $is_business = $company_name !== '' && !in_array(strtolower($company_name), ['individual', '1ndividual', 'n/a', 'none', 'private'], true);
-        $customer_name = $is_business ? $company_name : trim($first_name . ' ' . $surname);
+        $customer_name = $is_business
+            ? $company_name
+            : KIT_Customers::format_person_display_name($first_name, $surname);
 
         // If customer name is still empty and we have customer_id, try to fetch it
         if (empty($customer_name) && isset($row->customer_id) && $row->customer_id > 0) {
             global $wpdb;
             $customer = $wpdb->get_row($wpdb->prepare(
-                "SELECT id, cust_id, name, surname, company_name
-                 FROM {$wpdb->prefix}kit_customers
-                 WHERE cust_id = %d OR id = %d
-                 ORDER BY CASE WHEN cust_id = %d THEN 0 ELSE 1 END
+                "SELECT c.id, c.cust_id, c.name, c.surname, co.company_name
+                 FROM {$wpdb->prefix}kit_customers c
+                 LEFT JOIN {$wpdb->prefix}kit_company_customers co ON c.company_id = co.company_id
+                 WHERE c.cust_id = %d OR c.id = %d
+                 ORDER BY CASE WHEN c.cust_id = %d THEN 0 ELSE 1 END
                  LIMIT 1",
                 intval($row->customer_id),
                 intval($row->customer_id),
@@ -269,7 +323,9 @@ function plugin_Waybill_list_page()
                     $fallback_company = '';
                 }
                 $fallback_is_business = $fallback_company !== '' && !in_array(strtolower($fallback_company), ['individual', '1ndividual', 'n/a', 'none', 'private'], true);
-                $customer_name = $fallback_is_business ? $fallback_company : trim($fallback_first . ' ' . $fallback_surname);
+                $customer_name = $fallback_is_business
+                    ? $fallback_company
+                    : KIT_Customers::format_person_display_name($fallback_first, $fallback_surname);
                 $company_name = $fallback_company;
                 $surname = $fallback_surname;
             }
@@ -319,7 +375,9 @@ function plugin_Waybill_list_page()
             'waybill_no' => $row->waybill_no ?? 'N/A',
             'description' => $row->description ?? '',
             'customer_name' => $customer_name,
-            'customer_surname' => $final_is_business ? '' : $surname,
+            'customer_surname' => ($final_is_business || KIT_Customers::format_person_display_name($customer_name, $surname) === $customer_name)
+                ? ''
+                : $surname,
             'customer_company' => $company_name,
             // Expose customer_id so table callbacks (e.g. customer_name column) can link to the customer detail page
             'customer_id' => isset($row->customer_id) ? intval($row->customer_id) : 0,
@@ -329,6 +387,8 @@ function plugin_Waybill_list_page()
             'destination' => $dest_label !== '' ? $dest_label : '—',
             'approval' => $row->approval ?? 'pending',
             'warehouse' => $row->warehouse ?? '',
+            'is_warehoused' => $is_in_warehouse ? 1 : 0,
+            'created_at' => $row->created_at ?? '',
             'status' => $row->status ?? 'created',
             'total_mass_kg' => $total_mass,
             'total_volume' => $total_volume,
@@ -402,38 +462,8 @@ function plugin_Waybill_list_page()
             ?>
             <div class="ajaxReload">
                 <?php
-                $waybill_stats = [
-                    [
-                        'title' => 'Total Waybills',
-                        'value' => number_format(KIT_Waybills::get_waybill_count()),
-                        'icon' => 'M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z',
-                        'color' => 'blue'
-                    ],
-                    [
-                        'title' => 'Recent Waybills',
-                        'value' => number_format(KIT_Waybills::get_recent_waybill_count()),
-                        'subtitle' => 'Last 7 days',
-                        'icon' => 'M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z',
-                        'color' => 'green'
-                    ],
-                    [
-                        'title' => 'Pending',
-                        'value' => number_format(KIT_Waybills::get_pending_waybill_count()),
-                        'icon' => 'M12 8v4m0 4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z',
-                        'color' => 'yellow'
-                    ]
-                ];
-                echo KIT_QuickStats::render($waybill_stats, 'Waybill Overview', [
-                    'grid_cols' => 'grid-cols-1 sm:grid-cols-3 md:grid-cols-3',
-                    'gap' => 'gap-4'
-                ]);
+                echo KIT_QuickStats::render_for_context(KIT_QuickStats::CONTEXT_WAYBILL_MANAGE, []);
                 ?>
-                <script>
-                document.addEventListener('DOMContentLoaded', function () {
-                    var grid = document.querySelector('.kit-dashboard-kpis .grid') || document.querySelector('.wrap .grid');
-                    if (!grid) return;
-                });
-                </script>
                 <div class="space-y-4">
                     <?php
                     // Define actions
@@ -528,26 +558,11 @@ function plugin_Waybill_list_page()
 
                     // Render table (infinite scroll) and pass actions so they appear in the dedicated Actions column
                     if (class_exists('KIT_Unified_Table')) {
-                        // #region agent log
-                        $main_table_options = [
+                        $main_table_options = KIT_Unified_Table::optionsWithManageDefaults([
                             'title' => 'All Waybills',
-                            'sync_entity' => 'waybills',
-                            'table_class' => 'w-full table-auto border-collapse',
                             'actions' => $actions,
-                            'searchable' => true,
-                            'sortable' => true,
-                            'exportable' => true,
-                            'bulk_management' => true,
-                            'bulk_actions_list' => ['delete', 'export', 'packing_list'],
-                            'delivery_list_print' => true,
                             'empty_message' => 'No waybills found',
-                            'groupby' => 'city',
-                            'group_heading_prefix' => '',
-                            'preserve_order' => true,
-                            'group_collapsible' => true,
-                            'group_collapsed' => false,
-                            'table_type' => true
-                        ];
+                        ]);
 
                         echo KIT_Unified_Table::infinite($waybillData, $columns, $main_table_options);
                     }
@@ -556,6 +571,124 @@ function plugin_Waybill_list_page()
             </div>
         </div>
     </div>
+
+    <script>
+        document.addEventListener('DOMContentLoaded', function() {
+            var kpi = document.querySelector('.kit-waybill-kpis');
+            var tableBody = document.querySelector('table.kit-waybill-dashboard-table tbody');
+            var whToggle = document.getElementById('kit-waybill-show-warehouse');
+            if (kpi && tableBody && whToggle) {
+                var STORAGE_WH = 'kit_waybill_show_warehouse';
+                var recentCutoff = <?php echo wp_json_encode( date( 'Y-m-d', strtotime( '-7 days' ) ) ); ?>;
+                var kpiFilter = 'all';
+
+                function readShowWarehouse() {
+                    try {
+                        var v = localStorage.getItem(STORAGE_WH);
+                        if (v === null) {
+                            return true;
+                        }
+                        return v === '1' || v === 'true';
+                    } catch (e) {
+                        return true;
+                    }
+                }
+
+                function writeShowWarehouse(on) {
+                    try {
+                        localStorage.setItem(STORAGE_WH, on ? '1' : '0');
+                    } catch (e) {}
+                }
+
+                function setActiveKpiCard(filter) {
+                    kpi.querySelectorAll('[data-kit-card-filter]').forEach(function (el) {
+                        var on = el.getAttribute('data-kit-card-filter') === filter;
+                        el.classList.toggle('ring-2', on);
+                        el.classList.toggle('ring-blue-400', on);
+                        el.classList.toggle('border-blue-300', on);
+                    });
+                }
+
+                function rowMatchesKpi(tr) {
+                    if (kpiFilter === 'all') {
+                        return true;
+                    }
+                    if (kpiFilter === 'pending') {
+                        return (tr.getAttribute('data-status') || '').toLowerCase() === 'pending';
+                    }
+                    if (kpiFilter === 'recent') {
+                        var c = tr.getAttribute('data-created-at') || '';
+                        if (c.length < 10) {
+                            return false;
+                        }
+                        return c.slice(0, 10) >= recentCutoff;
+                    }
+                    return true;
+                }
+
+                function applyWaybillListFilters() {
+                    var showWh = whToggle.checked;
+                    writeShowWarehouse(showWh);
+
+                    tableBody.querySelectorAll('tr').forEach(function (tr) {
+                        if (tr.hasAttribute('data-group-row')) {
+                            return;
+                        }
+                        if (!tr.hasAttribute('data-row-id')) {
+                            return;
+                        }
+
+                        var show = true;
+                        if (!showWh && tr.getAttribute('data-warehouse') === '1') {
+                            show = false;
+                        }
+                        if (show) {
+                            show = rowMatchesKpi(tr);
+                        }
+                        tr.style.display = show ? '' : 'none';
+                    });
+
+                    tableBody.querySelectorAll('tr[data-group-row="1"]').forEach(function (header) {
+                        var gid = header.getAttribute('data-group-id');
+                        if (!gid) {
+                            return;
+                        }
+                        var visible = 0;
+                        tableBody.querySelectorAll('tr[data-group-id="' + gid + '"]').forEach(function (tr) {
+                            if (tr.hasAttribute('data-group-row')) {
+                                return;
+                            }
+                            if (tr.style.display === 'none') {
+                                return;
+                            }
+                            visible++;
+                        });
+                        header.style.display = visible > 0 ? '' : 'none';
+                    });
+                }
+
+                whToggle.checked = readShowWarehouse();
+                setActiveKpiCard(kpiFilter);
+                whToggle.addEventListener('change', applyWaybillListFilters);
+
+                kpi.querySelectorAll('[data-kit-card-filter]').forEach(function (card) {
+                    card.addEventListener('click', function () {
+                        kpiFilter = card.getAttribute('data-kit-card-filter') || 'all';
+                        setActiveKpiCard(kpiFilter);
+                        applyWaybillListFilters();
+                    });
+                    card.addEventListener('keydown', function (e) {
+                        if (e.key === 'Enter' || e.key === ' ') {
+                            e.preventDefault();
+                            card.click();
+                        }
+                    });
+                });
+
+                applyWaybillListFilters();
+            }
+        });
+    </script>
 
     <script>
         document.addEventListener('DOMContentLoaded', function() {

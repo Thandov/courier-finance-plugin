@@ -39,6 +39,31 @@ E) Reload the Google Sheets Test page in WP Admin to verify connection.
 DB-to-Sheet sync: Add/Update/Delete for Drivers, Waybills, Waybill Items, Customers, and Deliveries are synced
    to kit_drivers, kit_waybills, kit_waybill_items, kit_customers, kit_deliveries tabs. Use constants to override.
 
+kit_deliveries tab (pull/push column layout)
+-------------------------------------------
+Eleven columns: id | del_id | delivery_reference | direction_id | destination_city_id | dispatch_date |
+truck_number | driver_id | status | created_by | created_at
+
+Pull sync matches delivery_reference in column C (or legacy column B). Rows need a reference like DEL-20260323-001
+or they are skipped.
+
+Google Sheets formula (DEL-YYYYMMDD-###; uses dispatch_date column F when valid, else today; avoids DEL-18991230
+when F is empty — Sheets treats blanks as date 0 → 1899-12-30). Paste into kit_deliveries cell C2, fill down:
+
+   ="DEL-"&TEXT(IF(ISBLANK(F2),TODAY(),IF(AND(ISNUMBER(F2),F2<1),TODAY(),IF(ISTEXT(F2),IFERROR(DATEVALUE(F2),TODAY()),F2))),"yyyymmdd")&"-"&TEXT(ROWS($C$2:C2),"000")
+
+Simpler (today only, no column F): ="DEL-"&TEXT(TODAY(),"yyyymmdd")&"-"&TEXT(ROWS($C$2:C2),"000")
+
+In PHP the canonical string is: Courier_Google_Sheets_Sync::get_delivery_reference_sheet_formula()
+
+Setup Seed / KIT_Seed_Pipeline (WP): reads kit_* tabs only (not Waybills). Order: drivers → deliveries →
+customers → waybills. Rows on kit_deliveries with a valid delivery_reference (DEL-YYYYMMDD-### exactly 3
+digits, or pending) are imported before waybills. Waybill seeding must NOT create deliveries — it only
+references trips already on kit_deliveries / in the DB.
+
+Apps Script (apps-script/): sole Waybills → kit_* sheet writer. DB→sheet push_all for drivers/customers/
+deliveries/waybills is blocked while COURIER_APPS_SCRIPT_OWNS_KIT_SHEETS is true (default).
+
 Usage in code:
   $rows = Courier_Google_Sheets::get_values('', 'Sheet1!A1:Z100');
   if (Courier_Google_Sheets::is_configured()) { ... }

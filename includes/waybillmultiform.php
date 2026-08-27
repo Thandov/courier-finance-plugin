@@ -91,9 +91,11 @@ function kit_render_waybill_multiform($atts)
         $last_waybill_customer_id = (int) KIT_Dashboard::get_last_waybill_customer_id();
     }
 
+    $kit_create_flat = empty($atts['is_modal']) && !empty($GLOBALS['kit_waybill_create_flat']);
+
     ob_start(); ?>
     
-    <form method="POST" action="<?php echo esc_attr($form_action); ?>" class="" id="multi-step-waybill-form" data-ajax-url="<?php echo admin_url('admin-ajax.php'); ?>" enctype="multipart/form-data" novalidate<?php if ($last_waybill_customer_id) : ?> data-last-waybill-customer-id="<?php echo esc_attr($last_waybill_customer_id); ?>"<?php endif; ?>>
+    <form method="POST" action="<?php echo esc_attr($form_action); ?>" class="<?php echo $kit_create_flat ? 'kit-t2 kit-create-t2' : ''; ?>" id="multi-step-waybill-form" data-ajax-url="<?php echo admin_url('admin-ajax.php'); ?>" enctype="multipart/form-data" novalidate<?php echo $kit_create_flat ? ' data-kit-create-flat="1"' : ''; ?><?php if ($last_waybill_customer_id) : ?> data-last-waybill-customer-id="<?php echo esc_attr($last_waybill_customer_id); ?>"<?php endif; ?>>
         <?php if ($is_edit_mode): ?>
             <input type="hidden" name="waybill_id" value="<?php echo esc_attr($waybill_id); ?>">
         <?php endif; ?>
@@ -107,6 +109,12 @@ function kit_render_waybill_multiform($atts)
         <?php if (isset($atts['is_modal']) && $atts['is_modal']): ?>
             <input type="hidden" name="is_modal" id="is_modal" value="1">
             <input type="hidden" name="original_page_url" id="original_page_url" value="">
+        <?php endif; ?>
+        <?php
+        $booking_request_id = isset($_GET['booking_request_id']) ? (int) $_GET['booking_request_id'] : 0;
+        if ($booking_request_id > 0) :
+            ?>
+            <input type="hidden" name="kit_booking_request_id" value="<?php echo esc_attr((string) $booking_request_id); ?>">
         <?php endif; ?>
         <?php wp_nonce_field($is_edit_mode ? 'update_waybill_nonce' : 'add_waybill_nonce'); ?>
         
@@ -144,28 +152,48 @@ function kit_render_waybill_multiform($atts)
             </div>
         </div>
 
+        <?php
+        $kit_waybill_steps = [
+            1 => 'Customer',
+            2 => 'Delivery',
+            3 => 'Charges',
+            4 => 'Review',
+        ];
+        ?>
+        <nav id="kit-waybill-step-indicator" class="mb-6<?php echo $kit_create_flat ? ' hidden' : ''; ?>" aria-label="Waybill create progress">
+            <ol class="flex flex-wrap items-center gap-2 sm:gap-0">
+                <?php foreach ($kit_waybill_steps as $num => $label) : ?>
+                    <li class="step-indicator flex items-center <?php echo $num < count($kit_waybill_steps) ? 'sm:flex-1' : ''; ?>" data-step="<?php echo (int) $num; ?>">
+                        <div class="kit-step-circle <?php echo $num === 1 ? 'bg-blue-600 text-white' : 'bg-gray-200 text-gray-600'; ?> flex h-8 w-8 shrink-0 items-center justify-center rounded-full text-sm font-semibold"><?php echo (int) $num; ?></div>
+                        <span class="kit-step-label <?php echo $num === 1 ? 'font-semibold text-blue-600' : 'text-gray-500'; ?> ml-2 text-sm truncate"><?php echo esc_html($label); ?></span>
+                        <?php if ($num < count($kit_waybill_steps)) : ?>
+                            <div class="mx-2 hidden h-px flex-1 bg-gray-200 sm:block" aria-hidden="true"></div>
+                        <?php endif; ?>
+                    </li>
+                <?php endforeach; ?>
+            </ol>
+        </nav>
+
         <!-- Step 1: Waybill Header & Customer Information -->
         <div class="step step-1 active" id="step-1">
             <?php require __DIR__ . '/waybill/steps/step1.php'; ?>
         </div>
 
         <!-- Step 2: Delivery/Destination -->
-        <div class="step step-2 hidden" id="step-2">
+        <div class="step step-2<?php echo $kit_create_flat ? '' : ' hidden'; ?>" id="step-2">
             <?php require __DIR__ . '/waybill/steps/step4.php'; ?>
         </div>
 
-        <!-- Step 3: Waybill Details (Charges & Fees) -->
-        <div class="step step-3 hidden" id="step-3">
+        <!-- Step 3: Charges & Fees (+ optional misc) -->
+        <div class="step step-3<?php echo $kit_create_flat ? '' : ' hidden'; ?>" id="step-3">
             <?php require __DIR__ . '/waybill/steps/step5.php'; ?>
         </div>
 
-        <!-- Step 4: Miscellaneous Items -->
-        <div class="step step-4 hidden" id="step-4">
-            <?php require __DIR__ . '/waybill/steps/step6.php'; ?>
-        </div>
+        <!-- Legacy step-4 slot kept for ID stability; misc lives under Charges now -->
+        <div class="step step-4 hidden" id="step-4" aria-hidden="true"></div>
 
-        <!-- Step 5: Parcels -->
-        <div class="step step-5 hidden" id="step-5">
+        <!-- Step 5: Parcels & Review -->
+        <div class="step step-5<?php echo $kit_create_flat ? '' : ' hidden'; ?>" id="step-5">
             <?php require __DIR__ . '/waybill/steps/step3.php'; ?>
         </div>
     </form>
@@ -244,6 +272,20 @@ function kit_render_waybill_multiform($atts)
             }
 
             window.waybillFormInitialized = true;
+            const isCreateFlat = form.getAttribute('data-kit-create-flat') === '1';
+            if (isCreateFlat) {
+                ['step-1', 'step-2', 'step-3', 'step-5'].forEach(function (id) {
+                    const el = document.getElementById(id);
+                    if (!el) return;
+                    el.classList.remove('hidden');
+                    el.classList.add('active');
+                });
+                if (typeof window.kitUpdateWaybillReview === 'function') {
+                    window.kitUpdateWaybillReview();
+                    form.addEventListener('input', window.kitUpdateWaybillReview);
+                    form.addEventListener('change', window.kitUpdateWaybillReview);
+                }
+            }
             
             // Capture original page URL for modal redirects
             const originalPageUrlField = document.getElementById('original_page_url');
@@ -1014,22 +1056,61 @@ function kit_render_waybill_multiform($atts)
             const prevButtons = document.querySelectorAll('.prev-step');
             const stepIndicators = document.querySelectorAll('.step-indicator');
 
+            // Map DOM step ids → progress indicator index (misc folded into Charges)
+            function logicalStepNumber(stepEl) {
+                if (!stepEl) return 1;
+                const id = stepEl.id || '';
+                if (id === 'step-1') return 1;
+                if (id === 'step-2') return 2;
+                if (id === 'step-3' || id === 'step-4') return 3;
+                if (id === 'step-5') return 4;
+                const stepMatch = stepEl.className.match(/step-(\d)/);
+                return stepMatch ? parseInt(stepMatch[1], 10) : 1;
+            }
+
             // Common function to switch steps
             function switchStep(fromStep, toStep) {
                 if (!toStep || !fromStep) return;
+                // Legacy step-4 (misc) redirects to parcels/review
+                if (toStep.id === 'step-4') {
+                    toStep = document.getElementById('step-5') || toStep;
+                }
                 fromStep.classList.remove('active');
                 fromStep.classList.add('hidden');
                 toStep.classList.remove('hidden');
                 toStep.classList.add('active');
                 updateStepIndicator(toStep);
+                if (toStep.id === 'step-5' && typeof window.kitUpdateWaybillReview === 'function') {
+                    window.kitUpdateWaybillReview();
+                }
+                if (toStep.id === 'step-3' && typeof window.kitChargesReadyToContinue === 'function') {
+                    window.kitChargesReadyToContinue();
+                }
+                try {
+                    toStep.scrollIntoView({ behavior: 'smooth', block: 'start' });
+                } catch (e) {}
             }
 
+            if (isCreateFlat) {
+                if (typeof autoSelectRecentDelivery === 'function') {
+                    setTimeout(autoSelectRecentDelivery, 300);
+                }
+            } else {
             // NEXT step buttons
             nextButtons.forEach(button => {
                 button.addEventListener('click', function() {
+                    if (this.disabled) {
+                        return;
+                    }
                     const currentStep = document.querySelector('.step.active:not(.md\\:block)');
                     const targetId = this.getAttribute('data-target');
-                    const targetStep = targetId ? document.getElementById(targetId) : currentStep?.nextElementSibling;
+                    let targetStep = targetId ? document.getElementById(targetId) : currentStep?.nextElementSibling;
+
+                    if (currentStep && currentStep.id === 'step-3' && typeof window.kitChargesReadyToContinue === 'function') {
+                        if (!window.kitChargesReadyToContinue()) {
+                            return;
+                        }
+                    }
 
                     if (validateStep(currentStep)) {
                         switchStep(currentStep, targetStep);
@@ -1054,6 +1135,7 @@ function kit_render_waybill_multiform($atts)
                     switchStep(currentStep, targetStep);
                 });
             });
+            }
 
             // Enhanced step validation
             function validateStep(step) {
@@ -1087,33 +1169,37 @@ function kit_render_waybill_multiform($atts)
                 return true;
             }
 
-            // Progress bar / Step indicators
+            // Progress bar / Step indicators (4 logical steps)
             function updateStepIndicator(activeStep) {
-                if (!activeStep) return; // Guard against null
+                if (!activeStep) return;
                 
-                const stepMatch = activeStep.className.match(/step-(\d)/);
-                const stepNumber = stepMatch ? parseInt(stepMatch[1]) : -1;
+                const stepNumber = logicalStepNumber(activeStep);
 
                 stepIndicators.forEach((indicator, index) => {
-                    if (!indicator) return; // Guard against null
+                    if (!indicator) return;
                     
-                    const circle = indicator.querySelector('div');
-                    const label = indicator.querySelector('span');
+                    const circle = indicator.querySelector('.kit-step-circle');
+                    const label = indicator.querySelector('.kit-step-label');
                     
-                    if (!circle || !label) return; // Guard against null elements
+                    if (!circle || !label) return;
+
+                    const baseCircle = 'kit-step-circle flex h-8 w-8 shrink-0 items-center justify-center rounded-full text-sm font-semibold ';
+                    const baseLabel = 'kit-step-label ml-2 text-sm truncate ';
 
                     if (index + 1 === stepNumber) {
-                        circle.className = 'bg-blue-600 text-white';
-                        label.className = 'font-semibold text-blue-600';
+                        circle.className = baseCircle + 'bg-blue-600 text-white';
+                        label.className = baseLabel + 'font-semibold text-blue-600';
                     } else if (index + 1 < stepNumber) {
-                        circle.className = 'bg-green-500 text-white';
-                        label.className = 'font-semibold text-green-500';
+                        circle.className = baseCircle + 'bg-green-600 text-white';
+                        label.className = baseLabel + 'font-semibold text-green-700';
                     } else {
-                        circle.className = 'bg-gray-200 text-gray-600';
-                        label.className = 'text-gray-500';
+                        circle.className = baseCircle + 'bg-gray-200 text-gray-600';
+                        label.className = baseLabel + 'text-gray-500';
                     }
                 });
             }
+
+            updateStepIndicator(document.getElementById('step-1'));
             // Dynamic misc items
             const addMiscBtn = document.getElementById('add-misc-btn');
             const miscItemsContainer = document.getElementById('misc-items-container');

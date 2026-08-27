@@ -1,0 +1,42 @@
+---
+description: 3-level 08600 Solution admin sidebar — grouping map, not WP submenu API
+globs: includes/admin-menu.php,includes/admin-menu-nesting.php,assets/js/admin-menu-nesting.js,assets/css/admin-menu-nesting.css
+alwaysApply: false
+---
+
+# Admin sidebar: 3-level nesting
+
+WordPress `add_menu_page` / `add_submenu_page` is **2 levels only**. Do not invent a third PHP menu API.
+
+## Levels
+
+1. **08600 Solution** — `add_menu_page` slug `08600-dashboard`
+2. **Group or leaf** — Dashboard (leaf); Waybills / Trips / Customers / Operations / System (groups)
+3. **Pages** — still registered with `add_submenu_page` so caps, URLs, and `current` highlighting stay core
+
+## Canonical map
+
+`kit_admin_menu_nesting_groups()` in `includes/admin-menu-nesting.php`. JS only transforms `#toplevel_page_08600-dashboard .wp-submenu`.
+
+| L2 | L3 slugs |
+|---|---|
+| Dashboard | `08600-dashboard` (ungrouped leaf) |
+| Waybills | `08600-waybill-create`, `08600-waybill-manage`, `warehouse-waybills` |
+| Trips | `08600-trip-create`, `kit-deliveries` |
+| Customers | `08600-customers`, `08600-customer-portal-accounts` |
+| Operations | `route-management`, `08600-countries`, `manage-drivers` |
+| System | `08600-settings`, `08600-sync-runs`, `08600-help` |
+
+Hidden pages (`parent` `null`) stay out of the sidebar.
+
+## Rules
+
+1. New visible pages: `add_submenu_page('08600-dashboard', …)` **and** add the slug to the map (or leave ungrouped).
+2. Flatten a group when fewer than 2 children are visible (caps hide Settings / Sync Runs).
+3. Match WP admin chrome — no custom colour scheme, cards, or gradients on `#adminmenu`.
+4. Inline (expanded + current): accordion, current group open. Flyout (hover / folded): L3 opens to the right.
+
+```text
+Bad: add_submenu_page('08600-waybill-create', …) hoping for a third WP level
+Good: register under 08600-dashboard; add slug to kit_admin_menu_nesting_groups()
+```

@@ -98,13 +98,15 @@ $query        = $wpdb->prepare(
         w.total_volume,
         c.name AS customer_name,
         c.surname AS customer_surname,
-        c.company_name,
+        COALESCE(NULLIF(co.company_name, ''), NULLIF(cust_co.company_name, '')) AS company_name,
         dest_country.country_name AS destination_country,
         orig_country.country_name AS origin_country,
         city.city_name AS destination_city,
         d.delivery_reference
     FROM {$waybills_table} w
     LEFT JOIN {$customers_table} c ON w.customer_id = c.cust_id
+    LEFT JOIN {$wpdb->prefix}kit_company_customers co ON w.company_id = co.company_id
+    LEFT JOIN {$wpdb->prefix}kit_company_customers cust_co ON c.company_id = cust_co.company_id
     LEFT JOIN {$deliveries_table} d ON w.delivery_id = d.id
     LEFT JOIN {$shipping_directions_table} sd ON d.direction_id = sd.id
     LEFT JOIN {$cities_table} city ON w.city_id = city.id

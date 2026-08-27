@@ -22,6 +22,54 @@ $smallWidth = isset($atts['small_width']) && $atts['small_width'] === true;
 #scheduled-deliveries-container {
     background: transparent;
 }
+
+/* Match step4 Warehouse / Truck segmented control (dark active + amber text, slate inactive + white text) */
+.kit-del-filter-wrap .kit-del-filter-segment {
+    display: inline-flex;
+    border-radius: 0.5rem;
+    overflow: hidden;
+    border: 1px solid #1e293b;
+    box-shadow: 0 1px 2px rgba(15, 23, 42, 0.12);
+}
+.kit-del-filter-wrap .kit-del-filter-btn {
+    margin: 0;
+    min-width: 5.75rem;
+    padding: 0.5rem 0.75rem;
+    font-size: 0.8125rem;
+    font-weight: 600;
+    line-height: 1.25rem;
+    border: none;
+    cursor: pointer;
+    white-space: nowrap;
+    transition: background 0.2s ease, color 0.2s ease, box-shadow 0.2s ease;
+}
+.kit-del-filter-wrap .kit-del-filter-btn + .kit-del-filter-btn {
+    border-left: 1px solid rgba(15, 23, 42, 0.45);
+}
+.kit-del-filter-wrap .kit-del-filter-btn:focus {
+    outline: 2px solid #3b82f6;
+    outline-offset: 2px;
+    z-index: 1;
+}
+.kit-del-filter-wrap .kit-del-filter-btn.kit-del-filter--inactive {
+    background: linear-gradient(180deg, #64748b 0%, #475569 55%, #334155 100%);
+    color: #ffffff;
+    text-shadow: 0 1px 0 rgba(15, 23, 42, 0.25);
+}
+.kit-del-filter-wrap .kit-del-filter-btn.kit-del-filter--inactive:hover {
+    background: linear-gradient(180deg, #708196 0%, #526077 55%, #3d4a5c 100%);
+    color: #ffffff;
+}
+.kit-del-filter-wrap .kit-del-filter-btn.kit-del-filter--active {
+    background: linear-gradient(115deg, #0b1220 0%, #0f2847 38%, #172554 72%, #1e1b4b 100%);
+    color: #fde68a;
+    text-shadow: 0 1px 1px rgba(15, 23, 42, 0.45);
+    box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.12);
+}
+.kit-del-filter-wrap .kit-del-filter-btn.kit-del-filter--active:hover {
+    background: linear-gradient(115deg, #111827 0%, #15365a 38%, #1c2f66 72%, #25205e 100%);
+    color: #fef3c7;
+}
 </style>
 <div id="scheduled-deliveries-container" class="<?= $hide_header ? '' : 'mt-4' ?>">
     <?php
@@ -43,40 +91,30 @@ $smallWidth = isset($atts['small_width']) && $atts['small_width'] === true;
     </p>
     <?php endif; ?>
     
-    <!-- Filter Toggle Buttons -->
-    <div class="inline-flex border border-gray-300 bg-white shadow-sm mb-4" role="group" aria-label="Delivery filter toggle">
-        <?php
-        $filter_types = [
-            'scheduled' => 'Scheduled',
-            'all' => 'All Deliveries',
-            'past' => 'Past Waybills'
-        ];
-        
-        $filter_index = 0;
-        foreach ($filter_types as $filter_key => $filter_label):
-            $is_active = $current_filter === $filter_key;
-            $button_type = $is_active ? 'primary' : 'secondary';
-            $button_classes = '';
-            
-            // Determine border radius classes
-            if ($filter_index === 0) {
-                $button_classes = 'rounded-none rounded-l-none border-r-0';
-            } elseif ($filter_index === count($filter_types) - 1) {
-                $button_classes = 'rounded-none rounded-r-none';
-            } else {
-                $button_classes = 'rounded-none border-r-0';
-            }
-            
-            echo KIT_Commons::renderButton($filter_label, $button_type, 'sm', [
-                'type' => 'button',
-                'classes' => 'delivery-filter-btn ' . $button_classes,
-                'data-filter' => $filter_key,
-                'data-active' => $is_active ? '1' : '0'
-            ]);
-            
-            $filter_index++;
-        endforeach; 
-        ?>
+    <!-- Filter tabs: same visual language as step4 Warehouse / Truck -->
+    <div class="kit-del-filter-wrap mb-4" role="group" aria-label="Delivery filter toggle">
+        <div class="kit-del-filter-segment">
+            <?php
+            $filter_types = [
+                'scheduled' => 'Scheduled',
+                'all'         => 'All Deliveries',
+                'past'        => 'Past Waybills',
+            ];
+            foreach ($filter_types as $filter_key => $filter_label) :
+                $is_active      = $current_filter === $filter_key;
+                $state_class    = $is_active ? 'kit-del-filter--active' : 'kit-del-filter--inactive';
+                ?>
+                <button
+                    type="button"
+                    class="delivery-filter-btn kit-del-filter-btn <?= esc_attr($state_class); ?>"
+                    data-filter="<?= esc_attr($filter_key); ?>"
+                    data-active="<?= $is_active ? '1' : '0'; ?>"
+                    aria-pressed="<?= $is_active ? 'true' : 'false'; ?>"
+                ><?php echo esc_html($filter_label); ?></button>
+                <?php
+            endforeach;
+            ?>
+        </div>
     </div>
     
     <!-- Horizontal Row Layout - match the image layout -->
@@ -609,19 +647,13 @@ $smallWidth = isset($atts['small_width']) && $atts['small_width'] === true;
             
             const filterType = this.getAttribute('data-filter');
             
-            // Update button states - toggle active class
+            // Update button states (match step4 segmented control)
             filterButtons.forEach(btn => {
                 const isActive = btn === button;
                 btn.setAttribute('data-active', isActive ? '1' : '0');
-                
-                // Toggle active styling
-                if (isActive) {
-                    btn.classList.remove('bg-white', 'text-gray-700', 'border-gray-300', 'hover:bg-gray-50');
-                    btn.classList.add('bg-blue-600', 'text-white', 'border-blue-600', 'hover:bg-blue-700');
-                } else {
-                    btn.classList.remove('bg-blue-600', 'text-white', 'border-blue-600', 'hover:bg-blue-700');
-                    btn.classList.add('bg-white', 'text-gray-700', 'border-gray-300', 'hover:bg-gray-50');
-                }
+                btn.setAttribute('aria-pressed', isActive ? 'true' : 'false');
+                btn.classList.toggle('kit-del-filter--active', isActive);
+                btn.classList.toggle('kit-del-filter--inactive', !isActive);
             });
             
             // Show loading state
@@ -635,11 +667,23 @@ $smallWidth = isset($atts['small_width']) && $atts['small_width'] === true;
             formData.append('filter_type', filterType);
             formData.append('nonce', '<?php echo wp_create_nonce('filter_deliveries_nonce'); ?>');
             
-            fetch(ajaxurl || '<?php echo admin_url('admin-ajax.php'); ?>', {
+            const kitDelFilterAjaxUrl = (typeof window !== 'undefined' && window.ajaxurl)
+                || (typeof window !== 'undefined' && window.myPluginAjax && window.myPluginAjax.ajax_url)
+                || '<?php echo esc_url(admin_url('admin-ajax.php')); ?>';
+            
+            fetch(kitDelFilterAjaxUrl, {
                 method: 'POST',
-                body: formData
+                body: formData,
+                credentials: 'same-origin'
             })
-            .then(response => response.json())
+            .then(response => {
+                if (!response.ok) {
+                    return response.text().then(text => {
+                        throw new Error(text || ('HTTP ' + response.status));
+                    });
+                }
+                return response.json();
+            })
             .then(data => {
                 if (data.success) {
                     // Update delivery list
@@ -681,8 +725,7 @@ $smallWidth = isset($atts['small_width']) && $atts['small_width'] === true;
                     }
                     
                     // Cards already have inline onclick handlers from renderDeliveryCard
-                    // Just ensure cursor styling is correct
-                    const deliveriesList = document.getElementById('scheduled-deliveries-list');
+                    // Just ensure cursor styling is correct (reuse outer deliveriesList — do not redeclare; TDZ breaks .then)
                     if (deliveriesList) {
                         deliveriesList.querySelectorAll('.delivery-card').forEach(card => {
                             // Ensure cursor styling

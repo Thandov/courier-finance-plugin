@@ -73,6 +73,12 @@
             L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
                 attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a>'
             }).addTo(map);
+            setTimeout(function() {
+                map.invalidateSize();
+            }, 200);
+            window.addEventListener('resize', function() {
+                map.invalidateSize();
+            });
             return map;
         }
 

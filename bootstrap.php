@@ -47,15 +47,25 @@ if (!defined('ABSPATH')) {
     }
 }
 
-// Load Composer autoloader if available (for libraries like plugin-update-checker)
+// Load Composer autoloader if available (for libraries like dompdf, google/apiclient, qr-code)
 if (!class_exists('Composer\\Autoload\\ClassLoader')) {
-    $composerAutoload = __DIR__ . '/vendor/autoload.php';
-    if (!file_exists($composerAutoload)) {
-        // Also try plugin root vendor for safety (in case of different include path)
-        $composerAutoload = dirname(__FILE__) . '/vendor/autoload.php';
+    $vendorRoot = __DIR__ . '/vendor';
+    $composerAutoload = $vendorRoot . '/autoload.php';
+    $composerAutoloadReal = $vendorRoot . '/composer/autoload_real.php';
+
+    if (!is_file($composerAutoload)) {
+        $vendorRoot = dirname(__FILE__) . '/vendor';
+        $composerAutoload = $vendorRoot . '/autoload.php';
+        $composerAutoloadReal = $vendorRoot . '/composer/autoload_real.php';
     }
-    if (file_exists($composerAutoload)) {
+
+    if (is_file($composerAutoload) && is_file($composerAutoloadReal)) {
         require_once $composerAutoload;
+    } elseif (is_file($composerAutoload) && !is_file($composerAutoloadReal)) {
+        // Partial vendor upload: autoload.php exists but composer/ files are missing.
+        if (function_exists('error_log')) {
+            error_log('Courier Finance Plugin: incomplete vendor/ folder — run composer install or re-upload vendor/composer/');
+        }
     }
 }
 
@@ -110,7 +120,16 @@ if (!function_exists('wp_get_current_user')) {
 
 // Plugin-specific constants
 if (!defined('COURIER_FINANCE_PLUGIN_VERSION')) {
-    define('COURIER_FINANCE_PLUGIN_VERSION', '3.1.0');
+    define('COURIER_FINANCE_PLUGIN_VERSION', '3.2.0');
+}
+
+/**
+ * When true (default), Apps Script owns Waybills → kit_* sheet projection and
+ * Courier_Google_Sheets_Sync::push_all will not overwrite those tabs from MySQL.
+ * Set to false only if Apps Script projection is retired.
+ */
+if (!defined('COURIER_APPS_SCRIPT_OWNS_KIT_SHEETS')) {
+    define('COURIER_APPS_SCRIPT_OWNS_KIT_SHEETS', true);
 }
 
 if (!defined('COURIER_FINANCE_PLUGIN_PATH')) {

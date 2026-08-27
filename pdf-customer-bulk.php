@@ -44,17 +44,26 @@ if ($delivery_id > 0) {
     }
 }
 
-// Permission: Managers, Data Capturers, and Admins
-if (! class_exists('KIT_User_Roles')) {
-    wp_die('Access denied', 403);
-}
-if (! (KIT_User_Roles::is_admin() || KIT_User_Roles::is_manager() || KIT_User_Roles::is_data_capturer())) {
+// Permission: staff (with price PDF policy) OR customer portal (own customer only; selected_ids mode)
+if (!class_exists('KIT_User_Roles')) {
     wp_die('Access denied', 403);
 }
 
-// Check if user can see prices
-$can_see_prices = class_exists('KIT_User_Roles') && KIT_User_Roles::can_see_prices();
-if (! $can_see_prices) {
+$is_portal = is_user_logged_in()
+    && KIT_User_Roles::is_portal_customer()
+    && KIT_User_Roles::can_access_customer_portal()
+    && KIT_User_Roles::get_portal_customer_id() > 0;
+
+if ($is_portal) {
+    if ((int) $customer_id !== KIT_User_Roles::get_portal_customer_id()) {
+        wp_die('Access denied', 403);
+    }
+    if ($delivery_id > 0) {
+        wp_die('Access denied', 403);
+    }
+} elseif (!(KIT_User_Roles::is_admin() || KIT_User_Roles::is_manager() || KIT_User_Roles::is_data_capturer())) {
+    wp_die('Access denied', 403);
+} elseif (!KIT_User_Roles::can_see_prices()) {
     wp_die('Access denied. Price viewing not permitted.', 403);
 }
 
@@ -130,7 +139,6 @@ $total_sadc = 0.0;
 $total_intl = 0.0;
 $total_misc = 0.0;
 $waybill_numbers = [];
-$waybill_descriptions = [];
 $total_mass = 0.0;
 $total_volume = 0.0;
 $charge_basis_counts = ['mass' => 0, 'volume' => 0];
@@ -156,17 +164,6 @@ foreach ($waybills_data as $wb) {
         return $value === null ? '' : $value;
     }, $waybill);
     $waybill = (object) $waybill;
-    
-    // Collect description
-    if (!empty($waybill->miscellaneous)) {
-        $misc_data = maybe_unserialize($waybill->miscellaneous);
-        if (is_array($misc_data) && isset($misc_data['others']['waybill_description'])) {
-            $desc = trim($misc_data['others']['waybill_description']);
-            if (!empty($desc) && !in_array($desc, $waybill_descriptions)) {
-                $waybill_descriptions[] = $desc;
-            }
-        }
-    }
     
     // Get stored rates and charge basis from waybill
     $mass_charge = floatval($waybill->mass_charge ?? 0);
@@ -254,15 +251,19 @@ foreach ($waybills_data as $wb) {
     $waybill_transports[] = [
         'waybill_no' => $waybill_no,
         'charge_basis' => $charge_basis,
-        'charge_type' => ucfirst($charge_basis) . ' Charge',
+        // Mel (2026-08-05): generic transport label only — no goods description.
+        'charge_type' => 'Transport - ' . ucfirst($charge_basis) . ' Charge',
         'amount' => $charge_amount,
         'rate' => $charge_rate,
         'quantity' => $charge_quantity,
         'unit' => $charge_unit,
     ];
     
-    // Aggregate waybill items
+    // Aggregate waybill items (border clearing 10% applies only when VAT is included)
     if (!empty($quotation->items) && is_array($quotation->items)) {
+        $waybill_vat_included = class_exists('KIT_Waybills')
+            && (KIT_Waybills::normalize_flag_int($waybill->vat_include ?? 0) === 1);
+        if ($waybill_vat_included) {
         foreach ($quotation->items as $item) {
             $item_name = $item['item_name'] ?? '';
             $qty = intval($item['quantity'] ?? 0);
@@ -279,6 +280,7 @@ foreach ($waybills_data as $wb) {
                 $aggregated_items[$item_name]['qty'] += $qty;
                 $aggregated_items[$item_name]['subtotal'] += ($qty * $unit_price);
             }
+        }
         }
     }
     
@@ -338,7 +340,7 @@ foreach ($waybills_data as $wb) {
         }
         
         // Aggregate international fees (customs clearing) - count waybills and get unit price
-        if (empty($waybill->vat_include) || intval($waybill->vat_include ?? 0) === 0) {
+        if (class_exists('KIT_Waybills') && KIT_Waybills::normalize_flag_int($waybill->vat_include ?? 0) === 0) {
             $intl_amount = 0.0;
             if (isset($misc_data['others']['international_price_rands'])) {
                 $intl_amount = floatval($misc_data['others']['international_price_rands']);
@@ -434,9 +436,8 @@ if (class_exists('KIT_Commons')) {
 $pTextColor = $primary_color;
 $stroke_color = $primary_color;
 
-// Company details
-global $wpdb;
-$company = $wpdb->get_row("SELECT * FROM {$wpdb->prefix}kit_company_details LIMIT 1", ARRAY_A);
+// Company details — hardcoded 08600 identity merged with DB
+$company = class_exists('KIT_Company') ? KIT_Company::get_details_array() : [];
 
 // Get images
 $imagePath = plugin_dir_path(__FILE__) . '/icons/pin.png';
@@ -672,17 +673,8 @@ ob_start();
         </tr>
       </table>
 
-      <!-- DESCRIPTION -->
-      <?php if (!empty($waybill_descriptions)): ?>
-      <table width="100%" cellpadding="3" cellspacing="0" style="margin-bottom:12px;">
-        <tr>
-          <td style="padding:4px 0; border-bottom:1px solid #e9ecef;">
-            <h4 style="color: <?= $pTextColor ?>; margin: 0 0 3px 0; font-size:12px;">Description</h4>
-            <p style="margin: 0; font-size:10px;"><?= esc_html(implode(' | ', $waybill_descriptions)) ?></p>
-          </td>
-        </tr>
-      </table>
-      <?php endif; ?>
+      <!-- DESCRIPTION intentionally omitted (Mel, 2026-08-05): goods descriptions
+           stay on the waybill, not the customer invoice. -->
 
       <!-- BULK INVOICE SUMMARY -->
       <table width="100%" cellpadding="5" cellspacing="0" style="margin-bottom:12px; border-collapse:collapse;">
@@ -724,7 +716,7 @@ ob_start();
               <span style="display:inline-block;background:<?= $lightBadge ?>; color:<?= $pTextColor ?>; font-size:11px;padding:2px 8px;border-radius:6px;font-weight:600;">Transport</span>
             </td>
             <td class="cellStyle">
-              <span style="font-weight:600;">WB <?= esc_html($transport['waybill_no']) ?> - <?= esc_html($transport['charge_type']) ?></span>
+              <span style="font-weight:600;">WB <?= esc_html($transport['waybill_no']) ?> — <?= esc_html($transport['charge_type']) ?></span>
             </td>
             <td class="cellStyle" style="text-align:center;">
               <?= number_format($transport['quantity'], $transport['unit'] == 'm³' ? 3 : 2) ?> <?= esc_html($transport['unit']) ?>
@@ -791,28 +783,25 @@ ob_start();
         <?php endif; ?>
       </table>
       
-      <!-- CHARGES BREAKDOWN - TABLE 2: Border Clearing Items -->
-      <?php if (!empty($aggregated_items)): ?>
+      <!--
+        Border Clearing fee — the 10% line only.
+
+        Itemised parcel rows (item_name + declared value) used to render here.
+        Those are the goods descriptions Mel asked off the invoice (2026-08-05).
+        No amount changes: declared parcel values were never summed into
+        $final_total — only their 10% fee was.
+      -->
+      <?php if ($border_clearing_10_percent_total > 0): ?>
       <table width="100%" cellpadding="0" cellspacing="0" style="margin-bottom:5px;">
-        <tr style="font-size:12px;" class="scolor">
-          <td colspan="2" style="text-align:left; padding:9px 6px; border-bottom:1px solid #e0e7ef; width:50%;">
+        <tr style="font-size:12px; background:#f9fafb; border-bottom:1px solid #e0e7ef;">
+          <td class="cellStyle" style="width:18%;">
             <span style="display:inline-block; background: <?= $darkBadge ?>; color:#fff; font-weight: 700; font-size:11px;padding:2px 8px;border-radius:6px;">Border Clearing</span>
           </td>
-          <td colspan="3" align="right" style="font-weight: 700; padding:9px 6px; border-bottom:1px solid #e0e7ef;"></td>
-          <td align="right" style="font-weight: 700; padding:9px 6px; border-bottom:1px solid #e0e7ef; color:#fff; width:15%;">R <?= number_format($border_clearing_10_percent_total, 2) ?></td>
+          <td class="cellStyle" style="width:32%;">Border Clearing Fee (10% of declared value)</td>
+          <td class="cellStyle" style="text-align:center; width:12%;">1</td>
+          <td class="cellStyle" style="text-align:right; width:19%;">10%</td>
+          <td class="cellStyle" style="text-align:right; font-weight: 700; width:19%;">R <?= number_format($border_clearing_10_percent_total, 2) ?></td>
         </tr>
-        <?php foreach ($aggregated_items as $item_name => $item_data): ?>
-          <tr style="background:#f9fafb; border-bottom:1px solid #e0e7ef;">
-            <td class="cellStyle" style="width:18%;">
-              <span style="display:inline-block;background:<?= $lightBadge ?>; color:<?= $pTextColor ?>;font-size:11px;padding:2px 8px;border-radius:6px;">Border Clearing</span>
-            </td>
-            <td class="cellStyle" style="width:32%;"><?= htmlspecialchars($item_name) ?></td>
-            <td class="cellStyle" style="text-align:center; width:12%;"><?= $item_data['qty'] ?></td>
-            <td class="cellStyle" style="text-align:right; width:12%;"><?= number_format($item_data['unit_price'], 2) ?></td>
-            <td class="cellStyle" style="text-align:right; font-weight: 700; width:13%;">R <?= number_format($item_data['subtotal'], 2) ?></td>
-            <td class="cellStyle" style="text-align:right; font-weight: 700; width:13%;">R <?= number_format($item_data['ten_percent'], 2) ?></td>
-          </tr>
-        <?php endforeach; ?>
       </table>
       <?php endif; ?>
       

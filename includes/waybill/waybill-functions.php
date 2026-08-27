@@ -9,33 +9,32 @@ class KIT_Waybills
 {
     public static function init()
     {
+        // Waybill operations are staff-only. The employee and customer portals run as
+        // logged-in users, so the authenticated wp_ajax_/admin_post_ hooks cover them;
+        // no *_nopriv_ variant is registered for anything that reads or writes waybills.
         add_action('wp_ajax_load_waybill_page', [self::class, 'myplugin_ajax_load_waybill_page']);
-        add_action('wp_ajax_nopriv_load_waybill_page', [self::class, 'myplugin_ajax_load_waybill_page']);
+        // Outcomes of the state changes below are queued for the next request and
+        // printed here, instead of being signalled with query-string flags that
+        // stuck in the URL and re-fired on every reload.
+        add_action('admin_notices', ['KIT_Commons', 'printQueuedNotices']);
         add_action('admin_post_update_WaybillApproval', [self::class, 'update_waybillApproval']);
-        add_action('admin_post_nopriv_update_WaybillApproval', [self::class, 'update_waybillApproval']);
         add_action('admin_post_waybill_approve_and_invoice', [self::class, 'approve_and_invoice']);
-        add_action('admin_post_nopriv_waybill_approve_and_invoice', [self::class, 'approve_and_invoice']);
         add_action('admin_post_assign_waybill_to_delivery', [self::class, 'assign_waybill_to_delivery']);
-        add_action('admin_post_nopriv_assign_waybill_to_delivery', [self::class, 'assign_waybill_to_delivery']);
         // For JS fallback (POST without AJAX)
         add_action('admin_post_waybillQuoteStatus_update', [self::class, 'waybillQuoteStatus_update']);
-        add_action('admin_post_nopriv_waybillQuoteStatus_update', [self::class, 'waybillQuoteStatus_update']);
 
         // For AJAX (with JS enabled)
         add_action('wp_ajax_waybillQuoteStatus_update', [self::class, 'waybillQuoteStatus_update']);
-        add_action('wp_ajax_nopriv_waybillQuoteStatus_update', [self::class, 'waybillQuoteStatus_update']);
         add_shortcode('kit_waybill_form', [__CLASS__, 'display_waybill_form']);
         add_action('admin_post_add_waybill_action', [self::class, 'process_form']);
         add_action('wp_ajax_process_waybill_form', [self::class, 'process_form']);
-        add_action('wp_ajax_nopriv_process_waybill_form', [self::class, 'process_form']);
         add_action('wp_ajax_get_direction_id', [self::class, 'get_direction_id_ajax']);
-        add_action('wp_ajax_nopriv_get_direction_id', [self::class, 'get_direction_id_ajax']);
+        add_action('wp_ajax_kit_get_customer_last_waybill_template', [self::class, 'ajax_get_customer_last_waybill_template']);
         add_action('admin_post_update_waybill_action', [self::class, 'update_waybill_action']);
         add_action('admin_post_delete_waybill', [__CLASS__, 'handle_delete_waybill']);
         add_action('wp_ajax_delete_waybill', [__CLASS__, 'handle_delete_waybill']);
-        add_action('wp_ajax_nopriv_delete_waybill', [__CLASS__, 'handle_delete_waybill']);
+        add_action('wp_ajax_kit_email_waybill_pdf', [__CLASS__, 'ajax_email_waybill_pdf']);
         add_action('wp_ajax_get_delivery_data', [__CLASS__, 'get_delivery_data']);
-        add_action('wp_ajax_nopriv_get_delivery_data', [__CLASS__, 'get_delivery_data']);
         add_action('admin_post_generate_quote', [self::class, 'generate_Waybill_quote']);
         add_action('admin_post_get_waybill_count', [self::class, 'get_waybill_count']);
         add_action('admin_post_get_recent_waybill_count', [self::class, 'get_recent_waybill_count']);
@@ -43,13 +42,119 @@ class KIT_Waybills
         add_action('admin_post_get_latest_waybill_date', [self::class, 'get_latest_waybill_date']);
         add_action('admin_post_approve_waybill', [self::class, 'approve_waybill']);
         add_action('admin_post_update_destinationCountry', [self::class, 'update_destinationCountry']);
-        add_action('admin_post_nopriv_update_destinationCountry', [self::class, 'update_destination']);
         add_action('admin_post_getDestinationCountry', [self::class, 'getDestinationCountry']);
-        add_action('admin_post_nopriv_getDestinationCountry', [self::class, 'getDestinationCountry']);
 
         // PDF generation ajax endpoint removed – legacy pdf-generator.php handles output
     }
     // generate_pdf handler removed – use legacy pdf-generator.php file
+
+    /**
+     * Email the waybill PDF to the customer address on file (wp_mail + WordPress mail settings).
+     */
+    public static function ajax_email_waybill_pdf()
+    {
+        check_ajax_referer('email_waybill_pdf', 'nonce');
+
+        if (! is_user_logged_in()) {
+            wp_send_json_error(['message' => 'Unauthorized'], 403);
+        }
+
+        if (! class_exists('KIT_User_Roles') || ! KIT_User_Roles::can_see_prices()) {
+            wp_send_json_error(['message' => 'Forbidden'], 403);
+        }
+
+        $waybill_no = isset($_POST['waybill_no']) ? (int) $_POST['waybill_no'] : 0;
+        if ($waybill_no <= 0) {
+            wp_send_json_error(['message' => 'Invalid waybill number.']);
+        }
+
+        $pdf_row = self::pdfVerifier($waybill_no);
+        if (! is_array($pdf_row) || empty($pdf_row['soWhat'])) {
+            wp_send_json_error(['message' => 'This waybill cannot be emailed until it is approved and invoiced/quoted as required.'], 403);
+        }
+
+        global $wpdb;
+        $table = $wpdb->prefix . 'kit_waybills';
+        $email_raw = $wpdb->get_var($wpdb->prepare(
+            "SELECT email_address FROM {$table} WHERE waybill_no = %d LIMIT 1",
+            $waybill_no
+        ));
+
+        $to = is_string($email_raw) ? sanitize_email(trim($email_raw)) : '';
+        if ($to === '' || ! is_email($to)) {
+            wp_send_json_error(['message' => 'No customer email on file for this waybill.']);
+        }
+
+        if (! defined('COURIER_FINANCE_PLUGIN_PATH')) {
+            wp_send_json_error(['message' => 'Plugin path is not configured.'], 500);
+        }
+
+        $pdf_helper = COURIER_FINANCE_PLUGIN_PATH . 'includes/pdf/kit-waybill-pdf-binary.php';
+        if (! is_readable($pdf_helper)) {
+            wp_send_json_error(['message' => 'PDF module is missing.'], 500);
+        }
+        require_once $pdf_helper;
+
+        try {
+            $pdf_binary = kit_waybill_pdf_generate_binary($waybill_no);
+        } catch (Throwable $e) {
+            wp_send_json_error(['message' => $e->getMessage()], 500);
+        }
+
+        $tmp = wp_tempnam('waybill-' . $waybill_no . '-email.pdf');
+        if (! $tmp || file_put_contents($tmp, $pdf_binary) === false) {
+            wp_send_json_error(['message' => 'Could not prepare the PDF attachment.'], 500);
+        }
+
+        $subject = sprintf(
+            /* translators: %d: waybill number */
+            __('Waybill #%d – Quotation', '08600-services-quotations'),
+            $waybill_no
+        );
+        $body = '<p>' . esc_html(
+            sprintf(
+                /* translators: %d: waybill number */
+                __('Please find attached the waybill / quotation for waybill number %d.', '08600-services-quotations'),
+                $waybill_no
+            )
+        ) . '</p><p>' . esc_html(__('Thank you for your business.', '08600-services-quotations')) . '</p>';
+
+        $headers = ['Content-Type: text/html; charset=UTF-8'];
+
+        $attachments = [$tmp];
+        $mail_args = apply_filters(
+            'kit_waybill_pdf_email_args',
+            [
+                'to' => $to,
+                'subject' => $subject,
+                'body' => $body,
+                'headers' => $headers,
+                'attachments' => $attachments,
+            ],
+            $waybill_no
+        );
+
+        $send_to = isset($mail_args['to']) ? $mail_args['to'] : $to;
+        $send_to = sanitize_email((string) $send_to);
+        if ($send_to === '' || ! is_email($send_to)) {
+            @unlink($tmp);
+            wp_send_json_error(['message' => 'Invalid recipient after filter.']);
+        }
+
+        $send_subject = isset($mail_args['subject']) ? (string) $mail_args['subject'] : $subject;
+        $send_body = isset($mail_args['body']) ? (string) $mail_args['body'] : $body;
+        $send_headers = isset($mail_args['headers']) && is_array($mail_args['headers']) ? $mail_args['headers'] : $headers;
+        $send_attachments = isset($mail_args['attachments']) && is_array($mail_args['attachments']) ? $mail_args['attachments'] : $attachments;
+
+        $sent = wp_mail($send_to, $send_subject, $send_body, $send_headers, $send_attachments);
+        @unlink($tmp);
+
+        if (! $sent) {
+            wp_send_json_error(['message' => __('Email could not be sent. Check WordPress mail configuration.', '08600-services-quotations')]);
+        }
+
+        wp_send_json_success(['message' => __('Email sent.', '08600-services-quotations')]);
+    }
 
     public static function chargeGroup($country_id)
     {
@@ -97,6 +202,243 @@ class KIT_Waybills
         }
     }
 
+    /**
+     * AJAX: last waybill for a customer, shaped for Create Waybill prefill.
+     * Excludes mass and parcel line items by design.
+     */
+    public static function ajax_get_customer_last_waybill_template()
+    {
+        if (
+            !check_ajax_referer('get_waybills_nonce', 'nonce', false)
+            && !check_ajax_referer('get_waybills_nonce', '_ajax_nonce', false)
+        ) {
+            wp_send_json_error(['message' => 'Security check failed.']);
+        }
+
+        if (
+            !current_user_can('kit_edit_waybills')
+            && !current_user_can('kit_view_waybills')
+            && !current_user_can('kit_update_data')
+            && !current_user_can('manage_options')
+            && !current_user_can('edit_pages')
+        ) {
+            wp_send_json_error(['message' => 'You do not have permission to prefill waybills.']);
+        }
+
+        $customer_id = isset($_POST['customer_id']) ? (int) $_POST['customer_id'] : 0;
+        if ($customer_id <= 0) {
+            wp_send_json_error(['message' => 'Invalid customer.']);
+        }
+
+        $template = self::get_customer_last_waybill_template($customer_id);
+        if (empty($template)) {
+            wp_send_json_error(['message' => 'No previous waybill found for this customer.']);
+        }
+
+        wp_send_json_success($template);
+    }
+
+    /**
+     * Build a create-form template from a customer's most recent waybill.
+     *
+     * Copies route, flags, charge basis, volume dims/charges, and misc items.
+     * Never includes mass fields or parcel line items.
+     *
+     * @param int $customer_id
+     * @return array|null
+     */
+    public static function get_customer_last_waybill_template($customer_id)
+    {
+        global $wpdb;
+
+        $customer_id = (int) $customer_id;
+        if ($customer_id <= 0) {
+            return null;
+        }
+
+        $waybills_t   = $wpdb->prefix . 'kit_waybills';
+        $directions_t = $wpdb->prefix . 'kit_shipping_directions';
+        $deliveries_t = $wpdb->prefix . 'kit_deliveries';
+
+        $row = $wpdb->get_row(
+            $wpdb->prepare(
+                "SELECT
+                    w.id,
+                    w.waybill_no,
+                    w.customer_id,
+                    w.company_id,
+                    w.direction_id,
+                    w.city_id,
+                    w.delivery_id,
+                    w.warehouse,
+                    w.charge_basis,
+                    w.description,
+                    w.item_length,
+                    w.item_width,
+                    w.item_height,
+                    w.total_volume,
+                    w.volume_charge,
+                    w.include_sad500,
+                    w.include_sadc,
+                    w.vat_include,
+                    w.miscellaneous,
+                    sd.origin_country_id,
+                    sd.destination_country_id,
+                    d.delivery_reference,
+                    d.status AS delivery_status,
+                    d.dispatch_date
+                 FROM {$waybills_t} w
+                 LEFT JOIN {$directions_t} sd ON sd.id = w.direction_id
+                 LEFT JOIN {$deliveries_t} d ON d.id = w.delivery_id
+                 WHERE w.customer_id = %d
+                 ORDER BY w.created_at DESC, w.id DESC
+                 LIMIT 1",
+                $customer_id
+            ),
+            ARRAY_A
+        );
+
+        if (empty($row)) {
+            return null;
+        }
+
+        $misc = [];
+        if (!empty($row['miscellaneous'])) {
+            $decoded = maybe_unserialize($row['miscellaneous']);
+            if (is_array($decoded)) {
+                $misc = $decoded;
+            } else {
+                $json = json_decode((string) $row['miscellaneous'], true);
+                if (is_array($json)) {
+                    $misc = $json;
+                }
+            }
+        }
+        $others = (isset($misc['others']) && is_array($misc['others'])) ? $misc['others'] : [];
+
+        $origin_country_id = (int) ($others['origin_country_id'] ?? ($row['origin_country_id'] ?? 0));
+        $origin_city_id    = (int) ($others['origin_city_id'] ?? 0);
+        $dest_city_id      = (int) ($row['city_id'] ?? ($others['destination_city_id'] ?? 0));
+        $dest_country_id   = (int) ($others['destination_country_id'] ?? ($row['destination_country_id'] ?? 0));
+
+        // Prefer the city's actual country so the destination city select can resolve.
+        // (Some legacy rows have direction.destination_country_id out of sync with city_id.)
+        if ($dest_city_id > 0) {
+            $cities_t = $wpdb->prefix . 'kit_operating_cities';
+            $city_country_id = (int) $wpdb->get_var(
+                $wpdb->prepare(
+                    "SELECT country_id FROM {$cities_t} WHERE id = %d LIMIT 1",
+                    $dest_city_id
+                )
+            );
+            if ($city_country_id > 0) {
+                $dest_country_id = $city_country_id;
+            }
+        }
+
+        $warehouse = ((int) ($row['warehouse'] ?? 0) === 1);
+        $delivery_id = (int) ($row['delivery_id'] ?? 0);
+        $delivery_ref = strtolower(trim((string) ($row['delivery_reference'] ?? '')));
+        $delivery_status = strtolower(trim((string) ($row['delivery_status'] ?? '')));
+
+        // Warehouse / pending sentinel deliveries are not selectable trucks.
+        $usable_delivery = false;
+        if (
+            !$warehouse
+            && $delivery_id > 0
+            && $delivery_ref !== ''
+            && $delivery_ref !== 'pending'
+            && in_array($delivery_status, ['scheduled', 'in_transit', 'loading'], true)
+        ) {
+            $usable_delivery = true;
+        } else {
+            $delivery_id = 0;
+            if ($delivery_ref === 'pending' || $warehouse) {
+                $warehouse = true;
+            }
+        }
+
+        $misc_items = [];
+        if (!empty($misc['misc_items']) && is_array($misc['misc_items'])) {
+            foreach ($misc['misc_items'] as $item) {
+                if (!is_array($item)) {
+                    continue;
+                }
+                $label = trim((string) ($item['misc_item'] ?? $item['item_name'] ?? $item['description'] ?? ''));
+                $qty   = (int) ($item['misc_quantity'] ?? $item['quantity'] ?? 0);
+                $price = (float) str_replace(',', '.', (string) ($item['misc_price'] ?? $item['unit_price'] ?? 0));
+                if ($label === '' || $qty <= 0) {
+                    continue;
+                }
+                $misc_items[] = [
+                    'misc_item'     => sanitize_text_field($label),
+                    'misc_quantity' => $qty,
+                    'misc_price'    => round($price, 2),
+                ];
+            }
+        }
+
+        $charge_basis = strtolower(trim((string) ($row['charge_basis'] ?? '')));
+        if (!in_array($charge_basis, ['auto', 'mass', 'volume', 'weight'], true)) {
+            $charge_basis = 'auto';
+        }
+        if ($charge_basis === 'weight') {
+            $charge_basis = 'mass';
+        }
+
+        $description = trim((string) ($row['description'] ?? ''));
+        if ($description === '' && !empty($others['waybill_description'])) {
+            $description = trim((string) $others['waybill_description']);
+        }
+
+        $total_volume  = (float) ($row['total_volume'] ?? 0);
+        $volume_charge = (float) ($row['volume_charge'] ?? 0);
+        $item_length   = (float) ($row['item_length'] ?? 0);
+        $item_width    = (float) ($row['item_width'] ?? 0);
+        $item_height   = (float) ($row['item_height'] ?? 0);
+
+        $use_custom_volume_rate = !empty($others['use_custom_volume_rate']);
+        $custom_volume_rate = isset($others['custom_volume_rate_per_m3'])
+            ? (float) $others['custom_volume_rate_per_m3']
+            : 0.0;
+        $volume_rate_used = isset($others['volume_rate_used'])
+            ? (float) $others['volume_rate_used']
+            : 0.0;
+        if ($volume_rate_used <= 0 && $total_volume > 0 && $volume_charge > 0) {
+            $volume_rate_used = $volume_charge / $total_volume;
+        }
+
+        return [
+            'source_waybill_id' => (int) $row['id'],
+            'source_waybill_no' => (string) $row['waybill_no'],
+            'customer_id'        => (int) $row['customer_id'],
+            'company_id'         => (int) ($row['company_id'] ?? 0),
+            'description'        => sanitize_textarea_field($description),
+            'warehouse'          => $warehouse,
+            'delivery_id'        => $usable_delivery ? $delivery_id : 0,
+            'direction_id'       => (int) ($row['direction_id'] ?? 0),
+            'origin_country_id'  => $origin_country_id,
+            'origin_city_id'     => $origin_city_id,
+            'destination_country_id' => $dest_country_id,
+            'destination_city_id'    => $dest_city_id,
+            'charge_basis'       => $charge_basis,
+            'include_sad500'     => ((int) ($row['include_sad500'] ?? 0) === 1),
+            'include_sadc'       => ((int) ($row['include_sadc'] ?? 0) === 1),
+            'vat_include'        => ((int) ($row['vat_include'] ?? 0) === 1),
+            'item_length'        => $item_length,
+            'item_width'         => $item_width,
+            'item_height'        => $item_height,
+            'total_volume'       => $total_volume,
+            'volume_charge'      => $volume_charge,
+            'volume_rate_used'   => round($volume_rate_used, 4),
+            'use_custom_volume_rate' => (bool) $use_custom_volume_rate,
+            'custom_volume_rate_per_m3' => $custom_volume_rate,
+            'misc_items'         => $misc_items,
+            // Explicit exclusions for consumers / debugging.
+            'exclude'            => ['mass', 'parcels'],
+        ];
+    }
+
     public static function waybillQuoteStatus_update()
     {
         global $wpdb;
@@ -126,26 +468,48 @@ class KIT_Waybills
             ['%d', '%s']
         );
 
+        $status_label = KIT_Commons::invoiceStatusLabels()[$status] ?? $status;
 
-        if ($status === 'invoiced') {
-            // Update waybill status to invoiced (quotations removed)
-            $msg = (['message' => 'Waybill status updated to invoiced.']);
+        if ($updated !== false && $updated !== 0 && class_exists('KIT_Bulk_Action_Log')) {
+            KIT_Bulk_Action_Log::record(
+                'waybill_invoice_status',
+                [$waybillno],
+                'waybill',
+                sprintf('status -> %s', $status)
+            );
         }
 
-        // Check if it's AJAX
         if (defined('DOING_AJAX') && DOING_AJAX) {
             if ($updated !== false) {
-                wp_send_json_success(['message' => 'Waybill status updated successfully.']);
+                wp_send_json_success(['message' => sprintf('Invoice status set to %s.', $status_label)]);
             } else {
-                wp_send_json_error(['message' => 'Failed to update waybill status.']);
+                wp_send_json_error(['message' => 'Failed to update the invoice status.']);
             }
-        } else {
-            // Non-AJAX fallback: redirect with success or error notice
-            $redirect_url = admin_url('admin.php?page=08600-Waybill-view&waybill_id=' . $waybillid); // or wherever you want
-            $redirect_url = add_query_arg('waybill_Status_update', ($updated !== false ? 'success' : 'error'), $redirect_url);
-            wp_redirect($redirect_url);
-            exit;
         }
+
+        if ($updated === false) {
+            KIT_Commons::queueNotice(
+                'error',
+                'Invoice status not changed.',
+                'The database rejected the update, so nothing was saved. Please try again.'
+            );
+        } elseif ($updated === 0) {
+            KIT_Commons::queueNotice(
+                'info',
+                'No change made.',
+                sprintf('Waybill %s was already set to %s.', $waybillno, $status_label)
+            );
+        } else {
+            KIT_Commons::queueNotice(
+                'success',
+                'Invoice status updated.',
+                sprintf('Waybill %s is now %s.', $waybillno, $status_label)
+            );
+        }
+
+        KIT_Commons::redirectAfterAction(
+            admin_url('admin.php?page=08600-Waybill-view&waybill_id=' . $waybillid)
+        );
     }
 
 
@@ -203,19 +567,55 @@ class KIT_Waybills
             ['%d', '%s']
         );
 
-        if ($updated !== false) {
-            $redirect_args = ['approval_updated' => '1'];
+        // The handler knows exactly what it did, so it describes the outcome itself.
+        // Previously it set a generic URL flag and the view guessed at the wording,
+        // which is how the page came to announce an invoice reset that never happened.
+        $labels = KIT_Commons::approvalStatusLabels();
+        $from = (string) ($current_waybill->approval ?? '');
+        $to_label = $labels[$status] ?? $status;
 
-            // If we also updated the invoice status, add a flag to show a message
-            if (isset($update_data['status'])) {
-                $redirect_args['invoice_status_updated'] = '1';
-            }
-
-            wp_redirect(add_query_arg($redirect_args, wp_get_referer()));
-        } else {
-            wp_redirect(add_query_arg('approval_error', '1', wp_get_referer()));
+        if ($updated === false) {
+            KIT_Commons::queueNotice(
+                'error',
+                'Approval not changed.',
+                'The database rejected the update, so nothing was saved. Please try again.'
+            );
+            KIT_Commons::redirectAfterAction();
         }
-        exit;
+
+        if ($updated === 0) {
+            KIT_Commons::queueNotice(
+                'info',
+                'No change made.',
+                sprintf('Waybill %s was already set to %s.', $waybillno, $to_label)
+            );
+            KIT_Commons::redirectAfterAction();
+        }
+
+        KIT_Commons::queueNotice(
+            'success',
+            'Approval updated.',
+            sprintf('Waybill %s is now %s.', $waybillno, $to_label)
+        );
+
+        if (isset($update_data['status'])) {
+            KIT_Commons::queueNotice(
+                'info',
+                'Invoice status reset to Pending.',
+                sprintf('It was reset because approval moved away from %s.', $labels[$from] ?? $from)
+            );
+        }
+
+        if (class_exists('KIT_Bulk_Action_Log')) {
+            KIT_Bulk_Action_Log::record(
+                'waybill_approval',
+                [$waybillno],
+                'waybill',
+                sprintf('approval %s -> %s', $from !== '' ? $from : 'unset', $status)
+            );
+        }
+
+        KIT_Commons::redirectAfterAction();
     }
 
     /**
@@ -254,12 +654,31 @@ class KIT_Waybills
             ['%d', '%s']
         );
 
-        if ($updated !== false) {
-            wp_redirect(add_query_arg(['approval_updated' => '1', 'invoice_status_updated' => '1'], wp_get_referer()));
-        } else {
-            wp_redirect(add_query_arg('approval_error', '1', wp_get_referer()));
+        if ($updated === false) {
+            KIT_Commons::queueNotice(
+                'error',
+                'Nothing was changed.',
+                'The database rejected the update, so this waybill was neither approved nor invoiced.'
+            );
+            KIT_Commons::redirectAfterAction();
         }
-        exit;
+
+        KIT_Commons::queueNotice(
+            'success',
+            'Approved and invoiced.',
+            sprintf('Waybill %s is now Approved, with its invoice status set to Invoiced.', $waybillno)
+        );
+
+        if (class_exists('KIT_Bulk_Action_Log')) {
+            KIT_Bulk_Action_Log::record(
+                'waybill_approve_invoice',
+                [$waybillno],
+                'waybill',
+                'approval -> approved, status -> invoiced'
+            );
+        }
+
+        KIT_Commons::redirectAfterAction();
     }
 
     public static function assign_waybill_to_delivery()
@@ -282,8 +701,8 @@ class KIT_Waybills
         $assigned_by = get_current_user_id();
 
         if (!$waybill_id || !$delivery_id) {
-            wp_redirect(add_query_arg('assignment_error', '1', wp_get_referer()));
-            exit;
+            KIT_Commons::queueNotice('error', 'Assignment failed.', 'The waybill or delivery reference was missing from the request.');
+            KIT_Commons::redirectAfterAction();
         }
 
         // Check if waybill exists in warehouse tracking
@@ -293,8 +712,8 @@ class KIT_Waybills
         ));
 
         if (!$warehouse_waybill) {
-            wp_redirect(add_query_arg('assignment_error', '2', wp_get_referer()));
-            exit;
+            KIT_Commons::queueNotice('error', 'Assignment failed.', sprintf('Waybill %s could not be found.', $waybill_no));
+            KIT_Commons::redirectAfterAction();
         }
 
         // Check if delivery exists
@@ -304,14 +723,18 @@ class KIT_Waybills
         ));
 
         if (!$delivery) {
-            wp_redirect(add_query_arg('assignment_error', '3', wp_get_referer()));
-            exit;
+            KIT_Commons::queueNotice('error', 'Assignment failed.', 'That delivery no longer exists.');
+            KIT_Commons::redirectAfterAction();
         }
 
         // Check if waybill is already assigned
         if ($warehouse_waybill->status === 'assigned' || $warehouse_waybill->status === 'shipped' || $warehouse_waybill->status === 'delivered') {
-            wp_redirect(add_query_arg('assignment_error', '4', wp_get_referer()));
-            exit;
+            KIT_Commons::queueNotice(
+                'error',
+                'Already assigned.',
+                sprintf('Waybill %s is already %s, so it cannot be assigned again.', $waybill_no, $warehouse_waybill->status)
+            );
+            KIT_Commons::redirectAfterAction();
         }
 
         // Update warehouse tracking status
@@ -328,12 +751,25 @@ class KIT_Waybills
 
         if (!$result) {
             error_log("Failed to assign waybill {$waybill_no} to delivery {$delivery_id}: " . $wpdb->last_error);
-            wp_redirect(add_query_arg('assignment_error', '5', wp_get_referer()));
+            KIT_Commons::queueNotice('error', 'Assignment failed.', 'The database rejected the update, so nothing was saved.');
         } else {
             error_log("Waybill {$waybill_no} assigned to delivery {$delivery_id} by user {$assigned_by}");
-            wp_redirect(add_query_arg('assignment_success', '1', wp_get_referer()));
+            KIT_Commons::queueNotice(
+                'success',
+                'Assigned to delivery.',
+                sprintf('Waybill %s is now on delivery #%d.', $waybill_no, $delivery_id)
+            );
+            if (class_exists('KIT_Bulk_Action_Log')) {
+                KIT_Bulk_Action_Log::record(
+                    'waybill_delivery_assign',
+                    [$waybill_no],
+                    'waybill',
+                    sprintf('assigned to delivery %d', $delivery_id)
+                );
+            }
         }
-        exit;
+
+        KIT_Commons::redirectAfterAction();
     }
 
     public static function myplugin_ajax_load_waybill_page()
@@ -359,13 +795,13 @@ class KIT_Waybills
 
         // Capture the HTML output instead of echoing it directly
         ob_start();
-        echo KIT_Unified_Table::infinite($all_waybills, $columns, [
+        echo KIT_Unified_Table::infinite($all_waybills, $columns, KIT_Unified_Table::optionsWithManageDefaults([
             'title' => 'Waybills',
             'actions' => $actions,
             'pagination' => true,
             'items_per_page' => $items_per_page,
-            'current_page' => $paged
-        ]);
+            'current_page' => $paged,
+        ]));
         $html_output = ob_get_clean();
 
         // Return JSON response with the HTML content
@@ -385,7 +821,7 @@ class KIT_Waybills
         $waybill_table = $prefix . 'kit_waybills';
         $customers_table = $prefix . 'kit_customers';
         $cities_table = $prefix . 'kit_operating_cities';
-        
+
         // Get all waybills for this delivery (parcels are handled via parcel_id, not consolidated_waybill_id)
         $all_waybills = $wpdb->get_results($wpdb->prepare(
             "SELECT 
@@ -428,9 +864,9 @@ class KIT_Waybills
             AND d.id = %d",
             $deliveryid
         ), ARRAY_A);
-        
+
         // Sort by created_at DESC
-        usort($all_waybills, function($a, $b) {
+        usort($all_waybills, function ($a, $b) {
             $a_date = isset($a['created_at']) ? strtotime($a['created_at']) : 0;
             $b_date = isset($b['created_at']) ? strtotime($b['created_at']) : 0;
             return $b_date - $a_date;
@@ -441,7 +877,7 @@ class KIT_Waybills
             $product_amount = floatval($waybill['product_invoice_amount'] ?? 0);
             $miscellaneous = floatval($waybill['miscellaneous'] ?? 0);
             $waybill['total'] = $product_amount + $miscellaneous;
-            
+
             // Add city name if city_id exists
             $city_name = '';
             if (!empty($waybill['city_id'])) {
@@ -454,10 +890,10 @@ class KIT_Waybills
                     $waybill['customer_city'] = $city_name;
                 }
             }
-            
+
             // Add 'city' field for grouping (used by unified table)
             $waybill['city'] = $city_name !== '' ? $city_name : 'Unassigned City';
-            
+
             // Add waybill_type for sorting (parcels have parcel_id set)
             $waybill['waybill_type'] = (!empty($waybill['parcel_id'])) ? 'parcel' : 'regular';
         }
@@ -635,7 +1071,7 @@ class KIT_Waybills
                                 </span>
                             </td>
                             <td class="px-4 py-3 whitespace-nowrap">
-                                <?php echo KIT_Commons::renderButton($item_count . ' item' . (($item_count !== 1) ? 's' : ''), 'ghost-primary', 'sm', [
+                                <?php echo KIT_Commons::renderButton($item_count . ' item' . (($item_count !== 1) ? 's' : ''), 'ghost-primary', 'lg', [
                                     'classes' => 'toggle-items flex items-center',
                                     'data-waybill-id' => $waybill_id,
                                     'icon' => '<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7"></path>',
@@ -809,7 +1245,7 @@ class KIT_Waybills
             // Check if this is a parcel submission
             // Only use parcel table if MULTIPLE waybills (2+), single waybill uses regular waybill table only
             $is_parcel = isset($_POST['waybills']) && is_array($_POST['waybills']) && count($_POST['waybills']) > 1;
-            
+
             // Enhanced customer validation
             $customer_name = isset($_POST['customer_name']) ? trim($_POST['customer_name']) : '';
             $customer_surname = isset($_POST['customer_surname']) ? trim($_POST['customer_surname']) : '';
@@ -818,10 +1254,10 @@ class KIT_Waybills
             $email_address = isset($_POST['email_address']) ? trim($_POST['email_address']) : '';
             $cust_id = isset($_POST['cust_id']) ? intval($_POST['cust_id']) : 0;
             $customer_select = isset($_POST['customer_select']) ? sanitize_text_field($_POST['customer_select']) : '';
-            
+
             // Only validate customer fields if creating a new customer
             $is_new_customer = ($customer_select === 'new' || ($cust_id <= 0 && empty($customer_select)));
-            
+
             if ($is_new_customer) {
                 if (empty($customer_name)) {
                     $errors[] = [
@@ -908,19 +1344,19 @@ class KIT_Waybills
             // Check if this is a parcel submission
             // Only use parcel table if MULTIPLE waybills (2+), single waybill uses regular waybill table only
             $is_parcel = isset($_POST['waybills']) && is_array($_POST['waybills']) && count($_POST['waybills']) > 1;
-            
+
             // Enhanced destination validation
             // For parcels, destination validation is done per waybill in step 4/5
             if (!$is_parcel) {
                 $is_warehouse = isset($_POST['pending']) && $_POST['pending'] == 1;
-                
+
                 // Use backup field if main field is empty (for delivery card selections)
                 $destination_country = isset($_POST['destination_country']) ? trim($_POST['destination_country']) : '';
                 if (empty($destination_country) && isset($_POST['destination_country_backup'])) {
                     $destination_country = trim($_POST['destination_country_backup']);
                     $_POST['destination_country'] = $destination_country; // Sync to main field
                 }
-                
+
                 if (!$is_warehouse) {
                     if (empty($destination_country)) {
                         $errors[] = [
@@ -1555,6 +1991,62 @@ class KIT_Waybills
     }
 
     /**
+     * Normalize waybill boolean flags (TINYINT, bool, or VARCHAR e.g. vat_include).
+     * Same semantics as kit_google_sheet_parse_bool_int (settings.php) so we do not need that file loaded.
+     */
+    public static function normalize_flag_int($raw): int
+    {
+        if ($raw === null || $raw === false) {
+            return 0;
+        }
+        if ($raw === true) {
+            return 1;
+        }
+        $s = strtoupper(trim((string) $raw));
+        if ($s === '' || $s === 'NULL' || $s === 'N/A' || $s === 'NA' || $s === '-' || $s === '--') {
+            return 0;
+        }
+        if (in_array($s, ['1', 'TRUE', 'YES', 'Y', 'ON'], true)) {
+            return 1;
+        }
+        if (in_array($s, ['0', 'FALSE', 'NO', 'N', 'OFF'], true)) {
+            return 0;
+        }
+        if (is_numeric($s)) {
+            return ((float) $s != 0.0) ? 1 : 0;
+        }
+
+        return 0;
+    }
+
+    /**
+     * Overwrite columns from kit_waybills by primary key so SELECT w.* … JOIN cannot pick up duplicate-key overwrites.
+     *
+     * @param array $row Waybill row (ARRAY_A), must contain waybill_id or id.
+     */
+    public static function merge_canonical_waybill_columns(array &$row): void
+    {
+        global $wpdb;
+        $pk = isset($row['waybill_id']) ? (int) $row['waybill_id'] : (int) ($row['id'] ?? 0);
+        if ($pk <= 0 || empty($wpdb->prefix)) {
+            return;
+        }
+        $canonical = $wpdb->get_row($wpdb->prepare(
+            "SELECT include_sad500, include_sadc, vat_include, sad500_amount, sadc_amount, product_invoice_amount, waybill_items_total, miscellaneous
+             FROM {$wpdb->prefix}kit_waybills WHERE id = %d LIMIT 1",
+            $pk
+        ), ARRAY_A);
+        if (!is_array($canonical)) {
+            return;
+        }
+        foreach ($canonical as $col => $val) {
+            if ($val !== null) {
+                $row[$col] = $val;
+            }
+        }
+    }
+
+    /**
      * Default SADC certificate charge (in Rands) when no company setting exists.
      *
      * @return float
@@ -1817,6 +2309,16 @@ class KIT_Waybills
                 if ($posted_volume_charge > 0) {
                     $derived_rate = $posted_volume_charge / max(0.0001, $posted_total_volume);
                     $volume_charge = $posted_total_volume * $derived_rate;
+                } elseif (class_exists('KIT_Deliveries')) {
+                    $dir_for_vol = isset($data['direction_id']) ? intval($data['direction_id']) : 0;
+                    $origin_for_vol = isset($data['origin_country_id']) ? intval($data['origin_country_id']) : 0;
+                    $tier_rate = KIT_Deliveries::lookup_volume_rate_per_m3($dir_for_vol, $origin_for_vol, $posted_total_volume);
+                    if ($tier_rate !== null && $tier_rate > 0) {
+                        $volume_charge = $posted_total_volume * $tier_rate;
+                    } elseif ($snapshot_mass_rate > 0) {
+                        // Legacy fallback when no volumetric tier exists (avoid silently zeroing).
+                        $volume_charge = $posted_total_volume * $snapshot_mass_rate;
+                    }
                 } elseif ($snapshot_mass_rate > 0) {
                     $volume_charge = $posted_total_volume * $snapshot_mass_rate;
                 }
@@ -1849,6 +2351,82 @@ class KIT_Waybills
     }
 
     /**
+     * Merge non-empty step-1 customer fields from waybill POST into kit_customers.
+     * Does not clear existing DB values when POST omits a field (patch-only).
+     *
+     * @param int   $customer_id
+     * @param array $data        Full waybill payload (origin_country, telephone, etc.)
+     * @param array $fields      Pre-sanitized strings: customer_name, customer_surname, company_name, cell, address; email_address may be null
+     */
+    public static function sync_customer_profile_from_waybill_post($customer_id, array $data, array $fields)
+    {
+        $customer_id = (int) $customer_id;
+        if ($customer_id <= 0 || !class_exists('KIT_Customers')) {
+            return;
+        }
+
+        $patch = [];
+
+        $cn = isset($fields['customer_name']) ? trim((string) $fields['customer_name']) : '';
+        if ($cn !== '') {
+            $patch['name'] = sanitize_text_field($cn);
+        }
+        $sn = isset($fields['customer_surname']) ? trim((string) $fields['customer_surname']) : '';
+        if ($sn !== '') {
+            $patch['surname'] = sanitize_text_field($sn);
+        }
+        $comp = isset($fields['company_name']) ? trim((string) $fields['company_name']) : '';
+        if ($comp !== '' && class_exists('KIT_Customers')) {
+            $linked = KIT_Customers::resolve_company_id_from_payload(['company_name' => $comp]);
+            if ($linked > 0) {
+                $patch['company_id'] = $linked;
+            }
+        }
+        $cell = isset($fields['cell']) ? trim((string) $fields['cell']) : '';
+        if ($cell !== '') {
+            $patch['cell'] = sanitize_text_field($cell);
+        }
+        $addr = isset($fields['address']) ? trim((string) $fields['address']) : '';
+        if ($addr !== '') {
+            $patch['address'] = sanitize_textarea_field($addr);
+        }
+        if (!empty($fields['email_address']) && trim((string) $fields['email_address']) !== '') {
+            $patch['email_address'] = sanitize_email(trim((string) $fields['email_address']));
+        }
+
+        $origin_country = 0;
+        if (isset($data['origin_country']) && (string) $data['origin_country'] !== '') {
+            $origin_country = (int) $data['origin_country'];
+        } elseif (isset($data['country_id']) && (string) $data['country_id'] !== '') {
+            $origin_country = (int) $data['country_id'];
+        }
+        if ($origin_country > 0) {
+            $patch['country_id'] = $origin_country;
+        }
+
+        $origin_city = 0;
+        if (isset($data['origin_city']) && (string) $data['origin_city'] !== '') {
+            $origin_city = (int) $data['origin_city'];
+        } elseif (isset($data['city_id']) && (string) $data['city_id'] !== '') {
+            $origin_city = (int) $data['city_id'];
+        }
+        if ($origin_city > 0) {
+            $patch['city_id'] = $origin_city;
+        }
+
+        $tel = isset($data['telephone']) ? trim((string) $data['telephone']) : '';
+        if ($tel !== '') {
+            $patch['telephone'] = sanitize_text_field($tel);
+        }
+
+        if (empty($patch)) {
+            return;
+        }
+
+        KIT_Customers::update_customer($customer_id, $patch);
+    }
+
+    /**
      * Unified function to save or update a waybill
      * 
      * @param array $data Form data (typically $_POST)
@@ -1870,9 +2448,9 @@ class KIT_Waybills
         if ($is_update_mode) {
             $waybill_no = isset($data['waybill_no']) && !empty($data['waybill_no']) ? (string)$data['waybill_no'] : null;
             $posted_waybill_id = intval($data['waybill_id'] ?? 0);
-            
+
             $existing = $waybill_no ? self::getFullWaybillWithItems($waybill_no) : null;
-            
+
             if (!$existing && $posted_waybill_id) {
                 $resolved_no = $wpdb->get_var($wpdb->prepare("SELECT waybill_no FROM {$waybills_table} WHERE id = %d", $posted_waybill_id));
                 if ($resolved_no) {
@@ -1882,13 +2460,13 @@ class KIT_Waybills
                     }
                 }
             }
-            
+
             if (!$existing) {
                 return new WP_Error('not_found', 'Waybill not found.');
             }
-            
+
             $waybill_id = $existing->waybill['waybill_id'];
-            
+
             // Check approval status
             $waybill_approval = $existing->waybill['approval'] ?? 'pending';
             if (!KIT_User_Roles::can_edit_approved_waybill($waybill_approval)) {
@@ -1922,8 +2500,8 @@ class KIT_Waybills
         $customer_surname = isset($data['customer_surname']) ? sanitize_text_field(trim($data['customer_surname'])) : '';
         $company_name = isset($data['company_name']) ? sanitize_text_field(trim($data['company_name'])) : '';
         // Handle email - convert empty string to null
-        $email_address = isset($data['email_address']) && trim($data['email_address']) !== '' 
-            ? sanitize_email(trim($data['email_address'])) 
+        $email_address = isset($data['email_address']) && trim($data['email_address']) !== ''
+            ? sanitize_email(trim($data['email_address']))
             : null;
         $cell = isset($data['cell']) ? sanitize_text_field(trim($data['cell'])) : '';
         $address = isset($data['address']) ? sanitize_textarea_field(trim($data['address'])) : '';
@@ -1973,6 +2551,7 @@ class KIT_Waybills
         // SHARED: Customer handling
         // ============================================
         $customer_id = 0;
+        $company_id = isset($data['company_id']) ? (int) $data['company_id'] : 0;
         if (isset($data['cust_id']) && intval($data['cust_id']) > 0) {
             $customer_id = intval($data['cust_id']);
         } elseif (isset($data['customer_select']) && intval($data['customer_select']) > 0) {
@@ -1980,9 +2559,26 @@ class KIT_Waybills
         } elseif (isset($data['customer_id']) && intval($data['customer_id']) > 0) {
             $customer_id = intval($data['customer_id']);
         }
+        $client_type = strtolower(trim((string) ($data['client_type'] ?? $data['kit_customer_client_type'] ?? '')));
+        if ($company_id <= 0 && $client_type === 'business' && !empty($data['company_name']) && class_exists('KIT_Company_Customers')) {
+            $company_id = (int) KIT_Company_Customers::ensure_company((string) $data['company_name'], [
+                'cell' => $data['cell'] ?? '',
+                'telephone' => $data['telephone'] ?? '',
+                'email' => $data['email_address'] ?? $data['email'] ?? '',
+                'address' => $data['address'] ?? '',
+                'vat_number' => $data['vat_number'] ?? '',
+                'country_id' => $data['country_id'] ?? $data['origin_country'] ?? null,
+                'city_id' => $data['city_id'] ?? $data['origin_city'] ?? null,
+            ]);
+            // Company is the party; do not also create a person row from company_name.
+            if ($company_id > 0 && $customer_id <= 0) {
+                $customer_id = 0;
+            }
+        }
 
-        // Create new customer if needed (CREATE mode only)
-        if ($is_create_mode && (($customer_id <= 0 && $customer_select === 'new') || (empty($cust_id) && $customer_select === 'new'))) {
+        // Create new customer if needed (CREATE mode only) — individuals only
+        $new_customer_created_in_request = false;
+        if ($company_id <= 0 && $is_create_mode && (($customer_id <= 0 && $customer_select === 'new') || (empty($cust_id) && $customer_select === 'new'))) {
             // Customer form uses origin_* field names; fall back to country_id/city_id for compatibility.
             $country_raw = isset($data['country_id']) ? $data['country_id'] : (isset($data['origin_country']) ? $data['origin_country'] : 0);
             $city_raw = isset($data['city_id']) ? $data['city_id'] : (isset($data['origin_city']) ? $data['origin_city'] : 0);
@@ -2000,9 +2596,11 @@ class KIT_Waybills
                 'city_id' => $city_id,
             ]);
             if (!$new_customer_id || is_wp_error($new_customer_id)) {
-                return new WP_Error('customer_error', 'Failed to create new customer.');
+                $dup_msg = class_exists('KIT_Customers') ? KIT_Customers::get_last_customer_validation_error() : '';
+                return new WP_Error('customer_error', $dup_msg ?: 'Failed to create new customer. If this person or company already exists, pick them from the customer list instead of creating a new record.');
             }
             $customer_id = $new_customer_id;
+            $new_customer_created_in_request = true;
         }
 
         // UPDATE MODE: Handle customer change
@@ -2027,16 +2625,20 @@ class KIT_Waybills
         // SHARED: Misc charges
         // ============================================
         $final_misc_data = self::prepareMiscCharges($data);
-        
+
         // UPDATE MODE: Preserve original misc data if VAT unchanged
         if ($is_update_mode) {
             $original_vat = $existing->waybill['vat_include'] ?? 0;
             $new_vat = isset($data['vat_include']) ? 1 : 0;
             $vat_changed = ($original_vat != $new_vat);
-            
+
             if (!$vat_changed) {
                 $original_misc = maybe_unserialize($existing->waybill['miscellaneous'] ?? '');
-                $misc_was_posted = isset($data['misc']);
+                // Edit Waybill sends kit_waybill_misc_ui when the misc table is on the form.
+                // If the user removes every misc row, "misc" is absent from POST; without this flag
+                // we would wrongly restore misc_items from the DB and undelete their changes.
+                $misc_was_posted = isset($data['misc'])
+                    || (!empty($data['kit_waybill_misc_ui']) && $is_update_mode);
                 if (!$misc_was_posted && is_array($original_misc)) {
                     $final_misc_data['misc_items'] = $original_misc['misc_items'] ?? [];
                     $final_misc_data['misc_total'] = isset($original_misc['misc_total']) ? floatval($original_misc['misc_total']) : 0;
@@ -2103,10 +2705,11 @@ class KIT_Waybills
         // SHARED: Calculate total using bulletproof calculator
         // ============================================
         require_once plugin_dir_path(__FILE__) . 'bulletproof-calculator.php';
-        
+
         $vat_include = isset($data['vat_include']) ? (intval($data['vat_include']) ? 1 : 0) : 0;
-        $include_sad500 = isset($data['include_sad500']) ? 1 : 0;
-        $include_sadc = isset($data['include_sadc']) ? 1 : 0;
+        // Must use intval (not isset→1): seed/API pass 0 with key present; isset alone treated 0 as "on".
+        $include_sad500 = isset($data['include_sad500']) ? (intval($data['include_sad500']) ? 1 : 0) : 0;
+        $include_sadc = isset($data['include_sadc']) ? (intval($data['include_sadc']) ? 1 : 0) : 0;
         // Enforce business rule server-side: VAT and SADC are mutually exclusive.
         if ($vat_include) {
             $include_sadc = 0;
@@ -2137,7 +2740,7 @@ class KIT_Waybills
         $calculated_sad500_amount = floatval($calculation_breakdown['additional_charges']['sad500'] ?? 0);
         $calculated_sadc_amount = floatval($calculation_breakdown['additional_charges']['sadc'] ?? 0);
         $calculated_international_price = floatval($calculation_breakdown['additional_charges']['international_price'] ?? 0);
-        
+
         // Calculate border clearing total (10% of waybill items total)
         $calculated_border_clearing_total = $waybillItemsTotal * 0.10;
 
@@ -2156,7 +2759,7 @@ class KIT_Waybills
 
             $original_total = floatval($existing->waybill['product_invoice_amount'] ?? 0);
             $original_items_total = floatval($existing->waybill['waybill_items_total'] ?? 0);
-            
+
             $original_misc_total = 0.0;
             if (!empty($existing->waybill['miscellaneous'])) {
                 $original_misc = maybe_unserialize($existing->waybill['miscellaneous']);
@@ -2164,16 +2767,18 @@ class KIT_Waybills
                     $original_misc_total = floatval($original_misc['misc_total']);
                 }
             }
-            
+
             $values_changed = false;
-            if (abs(floatval($mass_charge) - floatval($existing->waybill['mass_charge'] ?? 0)) > 0.01 ||
+            if (
+                abs(floatval($mass_charge) - floatval($existing->waybill['mass_charge'] ?? 0)) > 0.01 ||
                 abs(floatval($volume_charge) - floatval($existing->waybill['volume_charge'] ?? 0)) > 0.01 ||
                 abs($misc_total - $original_misc_total) > 0.01 ||
                 abs($waybillItemsTotal - $original_items_total) > 0.01 ||
                 ($vat_include != ($existing->waybill['vat_include'] ?? 0)) ||
                 ($include_sad500 != ($existing->waybill['include_sad500'] ?? 0)) ||
                 ($include_sadc != ($existing->waybill['include_sadc'] ?? 0)) ||
-                ($charge_basis != ($existing->waybill['charge_basis'] ?? ''))) {
+                ($charge_basis != ($existing->waybill['charge_basis'] ?? ''))
+            ) {
                 $values_changed = true;
             }
 
@@ -2205,10 +2810,10 @@ class KIT_Waybills
         // ============================================
         if ($is_create_mode) {
             // Use provided waybill_no if available (for parcels), otherwise generate
-            $waybill_no = isset($data['waybill_no']) && !empty($data['waybill_no']) 
-                ? (string)$data['waybill_no'] 
+            $waybill_no = isset($data['waybill_no']) && !empty($data['waybill_no'])
+                ? (string)$data['waybill_no']
                 : self::generate_waybill_number();
-            
+
             $direction_id_input = isset($data['direction_id']) ? (int)$data['direction_id'] : 0;
             $delivery_id_input = isset($data['delivery_id']) ? (int)$data['delivery_id'] : 0;
 
@@ -2262,7 +2867,23 @@ class KIT_Waybills
                 $city_id = 9;
             }
 
-            $product_invoice_number = self::generate_product_invoice_number();
+            $posted_invoice = '';
+            if (!empty($data['product_invoice_number'])) {
+                $posted_invoice = sanitize_text_field(trim((string) $data['product_invoice_number']));
+            }
+            if ($posted_invoice === '' && !empty($data['custom_items']) && is_array($data['custom_items'])) {
+                foreach ($data['custom_items'] as $item) {
+                    if (!empty($item['client_invoice'])) {
+                        $posted_invoice = sanitize_text_field(trim((string) $item['client_invoice']));
+                        break;
+                    }
+                }
+            }
+            if ($posted_invoice !== '') {
+                $product_invoice_number = $posted_invoice;
+            } else {
+                $product_invoice_number = self::generate_product_invoice_number();
+            }
         } else {
             // UPDATE MODE: Use existing values as base
             $direction_id_input = $data['direction_id'] ?? $existing->waybill['direction_id'];
@@ -2299,13 +2920,32 @@ class KIT_Waybills
         }
 
         // ============================================
+        // SHARED: Resolve delivery_id (warehouse must never keep a truck id from POST)
+        // ============================================
+        if ($is_create_mode) {
+            $delivery_id_for_db = (int) $delivery_id_input;
+            if (!empty($is_warehouse)) {
+                $wid = (int) $wpdb->get_var("SELECT id FROM {$wpdb->prefix}kit_deliveries WHERE delivery_reference = 'pending' LIMIT 1");
+                if ($wid > 0) {
+                    $delivery_id_for_db = $wid;
+                }
+            } elseif ($delivery_id_for_db <= 0) {
+                // Legacy fallback when no delivery was posted (non-warehouse should normally validate earlier)
+                $delivery_id_for_db = 1;
+            }
+        } else {
+            $delivery_id_for_db = (int) ($delivery_id_input ?: ($existing->waybill['delivery_id'] ?? 0));
+        }
+
+        // ============================================
         // SHARED: Prepare waybill data array
         // ============================================
         $waybill_data = [
             'description' => $waybill_description,
             'direction_id' => (int)$direction_id_input,
-            'delivery_id' => (int)($delivery_id_input ?: ($is_create_mode ? 1 : $existing->waybill['delivery_id'])),
+            'delivery_id' => $delivery_id_for_db,
             'customer_id' => $customer_id,
+            'company_id' => $company_id > 0 ? $company_id : null,
             'city_id' => (int)$city_id,
             'product_invoice_amount' => (float)$waybillTotal,
             'waybill_items_total' => (float)$waybillItemsTotal,
@@ -2334,7 +2974,10 @@ class KIT_Waybills
             $waybill_data['waybill_no'] = (string) $waybill_no;
             $waybill_data['parcel_id'] = null; // Must be NULL on create; set later only for parcel waybills
             // warehouse is BOOLEAN (TINYINT(1)): 1 = in warehouse, 0/NULL = not in warehouse
-            $waybill_data['warehouse'] = $is_warehouse ? 1 : 0;
+            // UI uses `pending`; Google Sheet seed and API may set `warehouse` without `pending`.
+            $waybill_data['warehouse'] = $is_warehouse
+                ? 1
+                : ((isset($data['warehouse']) && ($data['warehouse'] == 1 || $data['warehouse'] === '1')) ? 1 : 0);
             $waybill_data['product_invoice_number'] = $product_invoice_number;
             $waybill_data['tracking_number'] = 'TRK-' . strtoupper(wp_generate_password(8, false));
             if (!empty($data['_skip_google_sync']) && isset($data['created_by']) && (int) $data['created_by'] > 0) {
@@ -2342,11 +2985,24 @@ class KIT_Waybills
                 $waybill_data['last_updated_by'] = (isset($data['last_updated_by']) && (int) $data['last_updated_by'] > 0)
                     ? (int) $data['last_updated_by']
                     : (int) $data['created_by'];
+                if (isset($data['approval_userid']) && (int) $data['approval_userid'] > 0) {
+                    $waybill_data['approval_userid'] = (int) $data['approval_userid'];
+                }
             } else {
                 $waybill_data['created_by'] = get_current_user_id();
                 $waybill_data['last_updated_by'] = get_current_user_id();
             }
-            $waybill_data['status'] = 'pending';
+            if (! empty($is_warehouse)) {
+                $waybill_data['status'] = 'pending';
+            } else {
+                $delivery_status = $wpdb->get_var($wpdb->prepare(
+                    "SELECT status FROM {$wpdb->prefix}kit_deliveries WHERE id = %d",
+                    $delivery_id_for_db
+                ));
+                $waybill_data['status'] = class_exists('KIT_Deliveries')
+                    ? KIT_Deliveries::map_delivery_status_to_waybill_status((string) $delivery_status)
+                    : 'assigned';
+            }
             $waybill_data['created_at'] = current_time('mysql');
             $waybill_data['last_updated_at'] = current_time('mysql');
         } else {
@@ -2376,6 +3032,11 @@ class KIT_Waybills
             }
             $waybill_id = $wpdb->insert_id;
 
+            $booking_req_id = isset($_POST['kit_booking_request_id']) ? (int) $_POST['kit_booking_request_id'] : (isset($data['kit_booking_request_id']) ? (int) $data['kit_booking_request_id'] : 0);
+            if ($booking_req_id > 0 && class_exists('KIT_Booking_Requests')) {
+                KIT_Booking_Requests::mark_converted($booking_req_id, (int) $waybill_id);
+            }
+
             // Save items
             if (!empty($data['custom_items'])) {
                 self::save_waybill_items($data['custom_items'], $waybill_no, $waybill_id, $vat_include);
@@ -2404,7 +3065,7 @@ class KIT_Waybills
                 $deliveries_table = $wpdb->prefix . 'kit_deliveries';
                 $delivery_data = [];
                 $delivery_formats = [];
-                
+
                 if (isset($data['destination_city']) && !empty($data['destination_city'])) {
                     $delivery_data['destination_city_id'] = intval($data['destination_city']);
                     $delivery_formats[] = '%d';
@@ -2455,7 +3116,7 @@ class KIT_Waybills
             if (!empty($data['custom_items']) && is_array($data['custom_items'])) {
                 $vat_include = isset($data['vat_include']) ? (intval($data['vat_include']) ? 1 : 0) : 0;
                 $updated_items_total = self::updateWaybillItems($data['custom_items'], $waybill_no);
-                
+
                 // Verify items total matches what we calculated (with tolerance for floating point)
                 if (abs($updated_items_total - $waybillItemsTotal) > 0.01) {
                     // If there's a mismatch, update the waybill with the actual items total from DB
@@ -2467,7 +3128,7 @@ class KIT_Waybills
                         ['%f'],
                         ['%d']
                     );
-                    
+
                     // Log mismatch for debugging (only if significant difference)
                     if (abs($updated_items_total - $waybillItemsTotal) > 1.00) {
                         error_log(sprintf(
@@ -2497,6 +3158,17 @@ class KIT_Waybills
         // ============================================
         // POST-PROCESSING
         // ============================================
+        if ($customer_id > 0 && !$new_customer_created_in_request) {
+            self::sync_customer_profile_from_waybill_post($customer_id, $data, [
+                'customer_name' => $customer_name,
+                'customer_surname' => $customer_surname,
+                'company_name' => $company_name,
+                'cell' => $cell,
+                'address' => $address,
+                'email_address' => $email_address,
+            ]);
+        }
+
         if ($is_create_mode) {
             // Generate QR code
             $qr_code_data = self::generate_qr_code_data($waybill_no);
@@ -2529,36 +3201,36 @@ class KIT_Waybills
     public static function save_parcel($data)
     {
         global $wpdb;
-        
+
         $waybills_table = $wpdb->prefix . 'kit_waybills';
         $parcels_table = $wpdb->prefix . 'kit_parcels';
         $waybills_array = $data['waybills'] ?? [];
-        
+
         // Require at least 2 waybills for a parcel
         // Single waybill should use regular waybill table (save_waybill), not parcel
         if (empty($waybills_array) || !is_array($waybills_array) || count($waybills_array) < 2) {
             return new WP_Error('invalid_data', 'Parcels require at least 2 waybills. Single waybill should use regular waybill table.');
         }
-        
+
         // Get customer_id from step 1 (shared across all waybills)
         // Handle both cust_id and customer_select (same logic as save_or_update_waybill)
         $cust_id = isset($data['cust_id']) ? intval($data['cust_id']) : 0;
         $customer_select = isset($data['customer_select']) ? sanitize_text_field($data['customer_select']) : '';
-        
+
         // Get customer details for new customer creation
         $customer_name = isset($data['customer_name']) ? sanitize_text_field(trim($data['customer_name'])) : '';
         $customer_surname = isset($data['customer_surname']) ? sanitize_text_field(trim($data['customer_surname'])) : '';
         $cell = isset($data['cell']) ? sanitize_text_field(trim($data['cell'])) : '';
         $address = isset($data['address']) ? sanitize_text_field(trim($data['address'])) : '';
         // Handle email - convert empty string to null
-        $email_address = isset($data['email_address']) && trim($data['email_address']) !== '' 
-            ? sanitize_email(trim($data['email_address'])) 
+        $email_address = isset($data['email_address']) && trim($data['email_address']) !== ''
+            ? sanitize_email(trim($data['email_address']))
             : null;
         $company_name = isset($data['company_name']) ? sanitize_text_field(trim($data['company_name'])) : '';
-        
+
         // Determine customer_id (check multiple possible sources)
         $customer_id = 0;
-        
+
         if ($cust_id > 0) {
             $customer_id = $cust_id;
         } elseif (!empty($customer_select) && $customer_select !== 'new' && intval($customer_select) > 0) {
@@ -2566,7 +3238,7 @@ class KIT_Waybills
         } elseif (isset($data['customer_id']) && intval($data['customer_id']) > 0) {
             $customer_id = intval($data['customer_id']);
         }
-        
+
         // Create new customer if needed
         if (($customer_id <= 0 && $customer_select === 'new')) {
             // Customer form uses origin_* field names; fall back to country_id/city_id for compatibility.
@@ -2574,7 +3246,7 @@ class KIT_Waybills
             $city_raw = isset($data['city_id']) ? $data['city_id'] : (isset($data['origin_city']) ? $data['origin_city'] : 0);
             $country_id = !empty($country_raw) ? intval($country_raw) : 0;
             $city_id = !empty($city_raw) ? intval($city_raw) : 0;
-            
+
             $new_customer_id = KIT_Customers::save_customer([
                 'customer_select' => $customer_select,
                 'customer_name' => $customer_name,
@@ -2586,34 +3258,35 @@ class KIT_Waybills
                 'country_id' => $country_id,
                 'city_id' => $city_id,
             ]);
-            
+
             if (!$new_customer_id || is_wp_error($new_customer_id)) {
-                return new WP_Error('customer_error', 'Failed to create new customer.');
+                $dup_msg = class_exists('KIT_Customers') ? KIT_Customers::get_last_customer_validation_error() : '';
+                return new WP_Error('customer_error', $dup_msg ?: 'Failed to create new customer. If this person or company already exists, pick them from the customer list instead of creating a new record.');
             }
             $customer_id = $new_customer_id;
         }
-        
+
         if (!$customer_id || $customer_id <= 0) {
             return new WP_Error('missing_customer', 'Customer ID is required. Please select a customer or create a new one.');
         }
-        
+
         // Generate parcel number (use first waybill's number as base)
         // Extract numeric base if alphanumeric (e.g., "4000a" -> "4000")
         if (isset($data['waybill_no']) && !empty($data['waybill_no'])) {
-            $base_waybill_no = preg_match('/^(\d+)/', (string)$data['waybill_no'], $matches) 
-                ? $matches[1] 
+            $base_waybill_no = preg_match('/^(\d+)/', (string)$data['waybill_no'], $matches)
+                ? $matches[1]
                 : (string)$data['waybill_no'];
         } else {
             $base_waybill_no = self::generate_waybill_number();
         }
         $parcel_no = (string)$base_waybill_no;
-        
+
         // Get description from step 1
         $description = isset($data['waybill_description']) ? sanitize_textarea_field($data['waybill_description']) : '';
-        
+
         // Start transaction
         $wpdb->query('START TRANSACTION');
-        
+
         try {
             // 1. Create parcel record
             $parcel_data = [
@@ -2628,28 +3301,28 @@ class KIT_Waybills
                 'created_at' => current_time('mysql'),
                 'last_updated_at' => current_time('mysql')
             ];
-            
+
             $inserted = $wpdb->insert($parcels_table, $parcel_data);
             if (!$inserted) {
                 throw new Exception('Failed to create parcel: ' . $wpdb->last_error);
             }
-            
+
             $parcel_id = $wpdb->insert_id;
             $total_amount = 0.00;
             $saved_waybills = [];
-            
+
             // 2. Save each waybill in the array
             foreach ($waybills_array as $index => $waybill_data) {
                 // Merge shared data (from step 1) with waybill-specific data
                 $full_waybill_data = array_merge($data, $waybill_data);
-                
+
                 // Handle custom_items - they should be in waybill_data with index
                 if (isset($data['custom_items']) && is_array($data['custom_items']) && isset($data['custom_items'][$index])) {
                     $full_waybill_data['custom_items'] = $data['custom_items'][$index];
                 } elseif (isset($waybill_data['custom_items'])) {
                     $full_waybill_data['custom_items'] = $waybill_data['custom_items'];
                 }
-                
+
                 // Get destination info from step 4 (first waybill) or from waybill data
                 if ($index === 0) {
                     // First waybill: use step 4 data
@@ -2663,11 +3336,11 @@ class KIT_Waybills
                     } else {
                         $full_waybill_data['destination_city'] = $data['destination_city'] ?? '';
                     }
-                    
+
                     $full_waybill_data['direction_id'] = $waybill_data['direction_id'] ?? $data['direction_id'] ?? '';
                     $full_waybill_data['delivery_id'] = $waybill_data['delivery_id'] ?? $data['delivery_id'] ?? '';
                 }
-                
+
                 // Generate unique waybill number for this waybill
                 if (isset($waybill_data['waybill_no']) && !empty($waybill_data['waybill_no'])) {
                     $waybill_no = (string)$waybill_data['waybill_no'];
@@ -2675,28 +3348,28 @@ class KIT_Waybills
                     // Generate waybill number with suffix: 4000a, 4000b, 4000c, etc.
                     $waybill_no = self::generate_child_waybill_number($parcel_no, $index);
                 }
-                
+
                 // Set the waybill number in the data
                 $full_waybill_data['waybill_no'] = $waybill_no;
-                
+
                 // Save the waybill using existing save function
                 $result = self::save_or_update_waybill($full_waybill_data, null, false);
-                
+
                 if (is_wp_error($result)) {
                     throw new Exception('Failed to save waybill #' . ($index + 1) . ': ' . $result->get_error_message());
                 }
-                
+
                 // Get the saved waybill ID
                 $saved_waybill_no = $result['waybill_no'] ?? $waybill_no;
                 $saved_waybill_id = $wpdb->get_var($wpdb->prepare(
                     "SELECT id FROM $waybills_table WHERE waybill_no = %s",
                     $saved_waybill_no
                 ));
-                
+
                 if (!$saved_waybill_id) {
                     throw new Exception('Failed to retrieve saved waybill ID for waybill #' . $saved_waybill_no);
                 }
-                
+
                 // Link waybill to parcel
                 $wpdb->update(
                     $waybills_table,
@@ -2705,20 +3378,20 @@ class KIT_Waybills
                     ['%d'],
                     ['%d']
                 );
-                
+
                 // Get waybill total for parcel total
                 $waybill_total = $wpdb->get_var($wpdb->prepare(
                     "SELECT product_invoice_amount FROM $waybills_table WHERE id = %d",
                     $saved_waybill_id
                 ));
                 $total_amount += floatval($waybill_total ?? 0);
-                
+
                 $saved_waybills[] = [
                     'waybill_no' => $saved_waybill_no,
                     'waybill_id' => $saved_waybill_id
                 ];
             }
-            
+
             // 3. Update parcel with total amount
             $wpdb->update(
                 $parcels_table,
@@ -2727,10 +3400,10 @@ class KIT_Waybills
                 ['%f'],
                 ['%d']
             );
-            
+
             // Commit transaction
             $wpdb->query('COMMIT');
-            
+
             return [
                 'parcel_no' => $parcel_no,
                 'parcel_id' => $parcel_id,
@@ -2739,7 +3412,6 @@ class KIT_Waybills
                 'success' => true,
                 'message' => sprintf('Successfully created parcel with %d waybills', count($saved_waybills))
             ];
-            
         } catch (Exception $e) {
             // Rollback on error
             $wpdb->query('ROLLBACK');
@@ -2757,11 +3429,11 @@ class KIT_Waybills
     public static function get_parcel($parcel_id)
     {
         global $wpdb;
-        
+
         $parcels_table = $wpdb->prefix . 'kit_parcels';
         $waybills_table = $wpdb->prefix . 'kit_waybills';
         $customers_table = $wpdb->prefix . 'kit_customers';
-        
+
         // Get parcel data
         $parcel = $wpdb->get_row(
             $wpdb->prepare(
@@ -2779,11 +3451,11 @@ class KIT_Waybills
             ),
             ARRAY_A
         );
-        
+
         if (!$parcel) {
             return null;
         }
-        
+
         // Get all waybills in this parcel
         $waybills = $wpdb->get_results(
             $wpdb->prepare(
@@ -2799,24 +3471,24 @@ class KIT_Waybills
             ),
             ARRAY_A
         );
-        
+
         $parcel['waybills'] = $waybills ? $waybills : [];
         $parcel['waybill_count'] = count($parcel['waybills']);
-        
+
         // Recalculate total_amount from actual waybills to ensure accuracy
         $calculated_total = $wpdb->get_var($wpdb->prepare(
             "SELECT COALESCE(SUM(product_invoice_amount), 0) FROM $waybills_table WHERE parcel_id = %d",
             $parcel_id
         ));
-        
+
         $calculated_total = floatval($calculated_total ?: 0);
-        
+
         // Store the original stored total for comparison
         $stored_total = floatval($parcel['total_amount'] ?? 0);
-        
+
         // Update the parcel array with the recalculated total
         $parcel['total_amount'] = $calculated_total;
-        
+
         // Update the database if the stored total differs from calculated total
         if (abs($stored_total - $calculated_total) > 0.01) {
             $wpdb->update(
@@ -2830,7 +3502,7 @@ class KIT_Waybills
                 ['%d']
             );
         }
-        
+
         return $parcel;
     }
 
@@ -2895,7 +3567,7 @@ class KIT_Waybills
                 c.cell as customer_cell,
                 c.email_address as customer_email,
                 c.address as customer_address,
-                c.company_name,
+                COALESCE(NULLIF(co.company_name, ''), NULLIF(cust_co.company_name, '')) as company_name,
                 c.country_id as customer_country_id,
                 dir.description as route_description,
                 origin_country.country_name as origin_country_name,
@@ -2909,19 +3581,30 @@ class KIT_Waybills
             LEFT JOIN $deliveries_table d ON w.delivery_id = d.id
             LEFT JOIN $drivers_table dr ON d.driver_id = dr.id
             LEFT JOIN $customers_table c ON w.customer_id = c.cust_id
+            LEFT JOIN {$wpdb->prefix}kit_company_customers co ON w.company_id = co.company_id
+            LEFT JOIN {$wpdb->prefix}kit_company_customers cust_co ON c.company_id = cust_co.company_id
             LEFT JOIN $directions_table dir ON d.direction_id = dir.id
             LEFT JOIN $countries_table origin_country ON dir.origin_country_id = origin_country.id
             LEFT JOIN $countries_table dest_country ON dir.destination_country_id = dest_country.id
             LEFT JOIN $cities_table dest_city ON w.city_id = dest_city.id
-            ORDER BY w.created_at DESC";
+            ORDER BY (w.waybill_no + 0) DESC, w.waybill_no DESC, w.id DESC";
 
         $all_waybills = $wpdb->get_results($query);
-        
-        // Sort by created_at DESC
-        usort($all_waybills, function($a, $b) {
-            $a_date = isset($a->created_at) ? strtotime($a->created_at) : 0;
-            $b_date = isset($b->created_at) ? strtotime($b->created_at) : 0;
-            return $b_date - $a_date;
+
+        // Match SQL: (waybill_no + 0) DESC, then string id, then internal id
+        usort($all_waybills, static function ($a, $b) {
+            $aNo = (string) ($a->waybill_no ?? '');
+            $bNo = (string) ($b->waybill_no ?? '');
+            $aNum = (float) ($aNo + 0);
+            $bNum = (float) ($bNo + 0);
+            if ($aNum !== $bNum) {
+                return $bNum <=> $aNum;
+            }
+            $strCmp = strcmp($bNo, $aNo);
+            if ($strCmp !== 0) {
+                return $strCmp;
+            }
+            return (int) ($b->id ?? 0) <=> (int) ($a->id ?? 0);
         });
 
         return $all_waybills;
@@ -3100,10 +3783,10 @@ class KIT_Waybills
         // Simple count - count all waybills (parcels are handled via parcel_id)
         if (empty($search_term)) {
             $waybills_table = $wpdb->prefix . 'kit_waybills';
-            
+
             // Count all waybills
             $total = $wpdb->get_var("SELECT COUNT(*) FROM $waybills_table");
-            
+
             return (int)$total;
         }
         // For search, try a simpler approach first to avoid JOIN issues
@@ -3173,6 +3856,34 @@ class KIT_Waybills
     }
 
     /**
+     * Count waybills flagged as warehouse storage (warehouse = 1).
+     */
+    public static function get_warehouse_waybill_count()
+    {
+        global $wpdb;
+        $count = $wpdb->get_var($wpdb->prepare(
+            "SELECT COUNT(*) FROM {$wpdb->prefix}kit_waybills WHERE warehouse = %d",
+            1
+        ));
+        return $count ? (int) $count : 0;
+    }
+
+    /**
+     * Warehouse-flagged waybills created in the last 7 days.
+     */
+    public static function get_recent_warehouse_waybill_count()
+    {
+        global $wpdb;
+        $date = date('Y-m-d', strtotime('-7 days'));
+        $count = $wpdb->get_var($wpdb->prepare(
+            "SELECT COUNT(*) FROM {$wpdb->prefix}kit_waybills WHERE warehouse = %d AND created_at >= %s",
+            1,
+            $date
+        ));
+        return $count ? (int) $count : 0;
+    }
+
+    /**
      * Generate a unique waybill number starting from 4000 and incrementing by 1
      * Works with both INT and VARCHAR (extracts numeric base from alphanumeric values)
      */
@@ -3186,16 +3897,16 @@ class KIT_Waybills
         // This handles both "4000" and "4000a" formats - extracts "4000" from both
         // For waybills in parcels (4000a, 4000b), we only consider the numeric base (4000)
         $all_waybills = $wpdb->get_col("SELECT waybill_no FROM $waybills_table");
-        
+
         // Also get parcel numbers
         $all_parcels = [];
         if ($wpdb->get_var("SHOW TABLES LIKE '$parcels_table'") === $parcels_table) {
             $all_parcels = $wpdb->get_col("SELECT parcel_no FROM $parcels_table");
         }
-        
+
         // Combine both arrays and extract numeric bases
         $all_numbers = array_merge($all_waybills, $all_parcels);
-        
+
         $max_numeric_base = 0;
         foreach ($all_numbers as $waybill_no) {
             // Extract numeric part from beginning of string (handles "4000", "4000a", "4001b", etc.)
@@ -3220,14 +3931,14 @@ class KIT_Waybills
             $exists_in_waybills = $wpdb->get_var(
                 $wpdb->prepare("SELECT COUNT(*) FROM $waybills_table WHERE waybill_no = %s", (string)$next_waybill_no)
             );
-            
+
             $exists_in_parcels = false;
             if ($wpdb->get_var("SHOW TABLES LIKE '$parcels_table'") === $parcels_table) {
                 $exists_in_parcels = $wpdb->get_var(
                     $wpdb->prepare("SELECT COUNT(*) FROM $parcels_table WHERE parcel_no = %s", (string)$next_waybill_no)
                 );
             }
-            
+
             $exists = $exists_in_waybills || $exists_in_parcels;
             if ($exists) {
                 $next_waybill_no++;
@@ -3236,7 +3947,7 @@ class KIT_Waybills
 
         return (string)$next_waybill_no; // Return as string for VARCHAR compatibility
     }
-    
+
     /**
      * Generate child waybill number with suffix (e.g., 4000a, 4000b, 4000c)
      * @param string|int $parent_waybill_no The parent waybill number (e.g., 4000)
@@ -3246,10 +3957,10 @@ class KIT_Waybills
     public static function generate_child_waybill_number($parent_waybill_no, $index = 0)
     {
         // Extract numeric base from parent (handles both "4000" and "4000a" formats)
-        $numeric_base = is_numeric($parent_waybill_no) 
-            ? intval($parent_waybill_no) 
+        $numeric_base = is_numeric($parent_waybill_no)
+            ? intval($parent_waybill_no)
             : (preg_match('/^(\d+)/', (string)$parent_waybill_no, $matches) ? intval($matches[1]) : 4000);
-        
+
         // Generate suffix: a, b, c, d, ... z, then aa, ab, etc.
         $suffix = '';
         if ($index < 26) {
@@ -3261,10 +3972,10 @@ class KIT_Waybills
             $second_letter = chr(97 + ($index % 26));
             $suffix = $first_letter . $second_letter;
         }
-        
+
         return (string)$numeric_base . $suffix;
     }
-    
+
     /**
      * Generate a unique uniform product_invoice_number
      * Format: INV-YYYYMMDD-XXXXX (sequential number)
@@ -3273,11 +3984,11 @@ class KIT_Waybills
     {
         global $wpdb;
         $table_name = $wpdb->prefix . 'kit_waybills';
-        
+
         // Get the highest invoice number for today's date
         $date_prefix = date('Ymd');
         $today_invoice_pattern = "INV-{$date_prefix}-";
-        
+
         // Get the highest sequential number for today
         $max_invoice = $wpdb->get_var($wpdb->prepare(
             "SELECT product_invoice_number FROM $table_name 
@@ -3286,7 +3997,7 @@ class KIT_Waybills
             LIMIT 1",
             $today_invoice_pattern . '%'
         ));
-        
+
         if ($max_invoice) {
             // Extract the sequential number from the last part
             $parts = explode('-', $max_invoice);
@@ -3296,16 +4007,16 @@ class KIT_Waybills
             // First invoice for today starts at 1
             $next_seq = 1;
         }
-        
+
         // Format as INV-YYYYMMDD-XXXXX (padded to 5 digits for consistency)
         $product_invoice_number = sprintf('%s%05d', $today_invoice_pattern, $next_seq);
-        
+
         // Check if this invoice number already exists (shouldn't happen, but safety check)
         $exists = $wpdb->get_var($wpdb->prepare(
             "SELECT COUNT(*) FROM $table_name WHERE product_invoice_number = %s",
             $product_invoice_number
         ));
-        
+
         // If it exists, increment until unique
         while ($exists) {
             $next_seq++;
@@ -3315,7 +4026,7 @@ class KIT_Waybills
                 $product_invoice_number
             ));
         }
-        
+
         return $product_invoice_number;
     }
 
@@ -3449,7 +4160,7 @@ class KIT_Waybills
                                             </svg>
                                         </a> -->
                                         <?php if ($args['show_create_quotation']): ?>
-                                            <?php echo KIT_Commons::renderButton('Quote', 'success', 'sm', [
+                                            <?php echo KIT_Commons::renderButton('Quote', 'success', 'lg', [
                                                 'title' => 'Create Quotation',
                                                 'data-waybill-id' => $quotation->id,
                                                 'icon' => '<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 13h6m-3-3v6m5 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />',
@@ -3525,7 +4236,9 @@ class KIT_Waybills
         global $wpdb;
 
         $shipDirectionTable = $wpdb->prefix . 'kit_shipping_directions';
-        // 1. Get the waybill details, delivery, customer, and quotation info
+        $customers_table = $wpdb->prefix . 'kit_customers';
+        $companies_table = $wpdb->prefix . 'kit_company_customers';
+        // 1. Get the waybill details, delivery, customer/company, and quotation info
         $waybill_data = $wpdb->get_row(
             $wpdb->prepare("
                 SELECT
@@ -3533,9 +4246,10 @@ class KIT_Waybills
                     w.*,
                     w.parcel_id,
                     w.created_at as gmode,
+                    w.direction_id AS waybill_direction_id,
                     w.city_id as waybill_destination_city_id,
                     dt.delivery_reference,
-                    dt.direction_id,
+                    dt.direction_id AS delivery_direction_id,
                     dt.dispatch_date,
                     dt.truck_number,
                     dt.driver_id as truck_driver,
@@ -3545,11 +4259,14 @@ class KIT_Waybills
                     sd.destination_country_id,
                     c.name as customer_name,
                     c.surname as customer_surname,
-                    c.cell,
-                    c.email_address,
-                    c.address,
-                    c.company_name,
-                    c.country_id,
+                    COALESCE(NULLIF(co.cell, ''), c.cell) as cell,
+                    COALESCE(NULLIF(co.telephone, ''), c.telephone) as telephone,
+                    COALESCE(NULLIF(co.email_address, ''), c.email_address) as email_address,
+                    COALESCE(NULLIF(co.address, ''), c.address) as address,
+                    COALESCE(NULLIF(co.company_name, ''), NULLIF(cust_co.company_name, '')) as company_name,
+                    COALESCE(NULLIF(co.vat_number, ''), c.vat_number) as vat_number,
+                    COALESCE(NULLIF(co.country_id, 0), c.country_id) as country_id,
+                    COALESCE(NULLIF(co.city_id, 0), c.city_id) as customer_city_id,
                     q.waybill_id,
                     q.subtotal,
                     q.vat_amount,
@@ -3565,10 +4282,12 @@ class KIT_Waybills
                     oc2.country_code AS destination_code
                 FROM {$wpdb->prefix}kit_waybills AS w
                 LEFT JOIN {$wpdb->prefix}kit_deliveries AS dt ON w.delivery_id = dt.id
-                LEFT JOIN {$wpdb->prefix}kit_customers AS c ON w.customer_id = c.cust_id
+                LEFT JOIN {$customers_table} AS c ON w.customer_id = c.cust_id
+                LEFT JOIN {$companies_table} AS co ON w.company_id = co.company_id
+                LEFT JOIN {$companies_table} AS cust_co ON c.company_id = cust_co.company_id
                 LEFT JOIN {$wpdb->prefix}kit_quotations AS q ON w.id = q.waybill_id
                 LEFT JOIN {$wpdb->prefix}users AS u ON u.id = w.approval_userid
-                LEFT JOIN $shipDirectionTable sd ON dt.direction_id = sd.id 
+                LEFT JOIN $shipDirectionTable sd ON w.direction_id = sd.id
                 LEFT JOIN {$wpdb->prefix}kit_operating_countries oc1 ON sd.origin_country_id = oc1.id 
                 LEFT JOIN {$wpdb->prefix}kit_operating_countries oc2 ON sd.destination_country_id = oc2.id 
                 WHERE
@@ -3586,6 +4305,14 @@ class KIT_Waybills
         $waybill_data = array_map(function ($value) {
             return $value === null ? '' : $value;
         }, $waybill_data);
+
+        // JOIN + w.* can let duplicate column names overwrite kit_waybills fields; re-read authoritative columns.
+        self::merge_canonical_waybill_columns($waybill_data);
+
+        // Keep shipment route on the waybill's direction (warehouse deliveries often use a different direction).
+        if (!empty($waybill_data['waybill_direction_id'])) {
+            $waybill_data['direction_id'] = (int) $waybill_data['waybill_direction_id'];
+        }
 
         $waybill_no = $waybill_data['waybill_no'];
         // 2. Get the waybill items
@@ -3642,12 +4369,12 @@ class KIT_Waybills
         } else {
             $misc_data = ['others' => [], 'misc_items' => [], 'misc_total' => 0.0];
         }
-        
+
         // ✅ Ensure 'others' array exists and has structure for waybill_description
         if (!isset($misc_data['others']) || !is_array($misc_data['others'])) {
             $misc_data['others'] = [];
         }
-        
+
         // Preserve waybill_description if it exists (don't overwrite with empty)
         // Only set default if it truly doesn't exist
         if (!isset($misc_data['others']['waybill_description'])) {
@@ -3659,10 +4386,10 @@ class KIT_Waybills
         // These are needed by selectsDestination.php and selectsOrigin.php components
         if (!isset($misc_data['others']['destination_city_id']) || empty($misc_data['others']['destination_city_id'])) {
             // Try waybill's city_id first, then delivery's destination_city_id
-            $destination_city_id = !empty($waybill_data['waybill_destination_city_id']) 
-                ? intval($waybill_data['waybill_destination_city_id']) 
-                : (!empty($waybill_data['delivery_destination_city_id']) 
-                    ? intval($waybill_data['delivery_destination_city_id']) 
+            $destination_city_id = !empty($waybill_data['waybill_destination_city_id'])
+                ? intval($waybill_data['waybill_destination_city_id'])
+                : (!empty($waybill_data['delivery_destination_city_id'])
+                    ? intval($waybill_data['delivery_destination_city_id'])
                     : 0);
             if ($destination_city_id > 0) {
                 $misc_data['others']['destination_city_id'] = $destination_city_id;
@@ -3671,8 +4398,8 @@ class KIT_Waybills
 
         if (!isset($misc_data['others']['destination_country_id']) || empty($misc_data['others']['destination_country_id'])) {
             // Get from direction's destination_country_id
-            $destination_country_id = !empty($waybill_data['destination_country_id']) 
-                ? intval($waybill_data['destination_country_id']) 
+            $destination_country_id = !empty($waybill_data['destination_country_id'])
+                ? intval($waybill_data['destination_country_id'])
                 : 0;
             if ($destination_country_id > 0) {
                 $misc_data['others']['destination_country_id'] = $destination_country_id;
@@ -3681,17 +4408,37 @@ class KIT_Waybills
 
         if (!isset($misc_data['others']['origin_country_id']) || empty($misc_data['others']['origin_country_id'])) {
             // Get from direction's origin_country_id
-            $origin_country_id = !empty($waybill_data['origin_country_id']) 
-                ? intval($waybill_data['origin_country_id']) 
+            $origin_country_id = !empty($waybill_data['origin_country_id'])
+                ? intval($waybill_data['origin_country_id'])
                 : 0;
             if ($origin_country_id > 0) {
                 $misc_data['others']['origin_country_id'] = $origin_country_id;
             }
         }
 
+        if (empty($misc_data['others']['origin_city_id']) && class_exists('KIT_Routes')) {
+            $origin_country_for_city = (int) ($misc_data['others']['origin_country_id'] ?? ($waybill_data['origin_country_id'] ?? 0));
+            if ($origin_country_for_city > 0) {
+                $default_origin_city = KIT_Routes::get_default_city_id_for_country($origin_country_for_city);
+                if ($default_origin_city > 0) {
+                    $misc_data['others']['origin_city_id'] = $default_origin_city;
+                }
+            }
+        }
+
         // Ensure 'others' array exists
         if (!isset($misc_data['others']) || !is_array($misc_data['others'])) {
             $misc_data['others'] = [];
+        }
+
+        // Remove stale fee snapshots when toggles are off (e.g. sheet says SAD500 FALSE but misc still holds a prior R amount).
+        $flag_s500 = self::normalize_flag_int($waybill_data['include_sad500'] ?? 0) === 1;
+        $flag_sadc = self::normalize_flag_int($waybill_data['include_sadc'] ?? 0) === 1;
+        if (!$flag_s500 && isset($misc_data['others']['include_sad500'])) {
+            unset($misc_data['others']['include_sad500']);
+        }
+        if (!$flag_sadc && isset($misc_data['others']['include_sadc'])) {
+            unset($misc_data['others']['include_sadc']);
         }
 
         $waybill_data['miscellaneous'] = $misc_data;
@@ -3704,17 +4451,29 @@ class KIT_Waybills
     public static function waybillView()
     {
         $waybill_id = isset($_GET['waybill_id']) ? intval($_GET['waybill_id']) : 0;
-        
+
         if ($waybill_id <= 0) {
-            if (!class_exists('KIT_Toast')) {
-                require_once plugin_dir_path(__FILE__) . '../components/toast.php';
-            }
-            KIT_Toast::ensure_toast_loads();
-            echo KIT_Toast::error('Invalid waybill ID.', 'Error');
+            echo '<div class="wrap"><div class="' . KIT_Commons::containerClasses() . '">';
+            echo KIT_Commons::emptyRecordState([
+                'title'   => 'No waybill selected',
+                'message' => 'This page needs a waybill to open. Pick one from Manage Waybills.',
+                'actions' => [
+                    [
+                        'label'   => 'Go to Manage Waybills',
+                        'href'    => admin_url('admin.php?page=08600-waybill-manage'),
+                        'primary' => true,
+                    ],
+                ],
+            ]);
+            echo '</div></div>';
             return;
         }
-        
+
         $waybill = KIT_Waybills::bonaWaybill($waybill_id);
+
+        if (class_exists('KIT_Commons')) {
+            KIT_Commons::enqueueComponentScripts(['kitscript']);
+        }
 
         // Build breadcrumb links
         $waybill_no = '';
@@ -3783,32 +4542,43 @@ class KIT_Waybills
         if (isset($waybill) && is_object($waybill)) {
             $waybill = (array) $waybill;
         }
-        
+
         // Pass parcel_id to view component if this waybill is in a parcel
         if ($parcel_id) {
             $waybill['_parcel_id'] = $parcel_id;
         }
     ?>
-        <div class="wrap">
-           
-            <?php
-            if (!empty($waybill) && is_array($waybill)) {
-                if (!$is_editing) { ?>
-                    <?php require(COURIER_FINANCE_PLUGIN_PATH . 'includes/components/viewWaybill.php'); ?>
+        <div class="wrap"> 
+            <div class="<?php echo KIT_Commons::containerClasses(); ?>">
+
                 <?php
+                if (!empty($waybill) && is_array($waybill)) {
+                    if (!$is_editing) { ?>
+                        <?php require(COURIER_FINANCE_PLUGIN_PATH . 'includes/components/viewWaybill.php'); ?>
+                    <?php
+                    } else {
+                    ?>
+                        <?php require(COURIER_FINANCE_PLUGIN_PATH . 'includes/components/editWaybill.php'); ?>
+                <?php
+                    }
                 } else {
+                    echo KIT_Commons::emptyRecordState([
+                        'title'   => 'Waybill not found',
+                        'message' => sprintf(
+                            'There is no waybill with ID %d. It may have been deleted, or the link may be from before the last data import.',
+                            $waybill_id
+                        ),
+                        'actions' => [
+                            [
+                                'label'   => 'Go to Manage Waybills',
+                                'href'    => admin_url('admin.php?page=08600-waybill-manage'),
+                                'primary' => true,
+                            ],
+                        ],
+                    ]);
+                }
                 ?>
-                    <?php require(COURIER_FINANCE_PLUGIN_PATH . 'includes/components/editWaybill.php'); ?>
-            <?php
-                }
-            } else {
-                if (!class_exists('KIT_Toast')) {
-                    require_once plugin_dir_path(__FILE__) . '../components/toast.php';
-                }
-                KIT_Toast::ensure_toast_loads();
-                echo KIT_Toast::error('Waybill not found or invalid data.', 'Error');
-            }
-            ?>
+            </div>
         </div>
         <?php
     }
@@ -3831,7 +4601,7 @@ class KIT_Waybills
         // Accept either waybill_id or waybill_no
         $waybill_id = isset($_POST['waybill_id']) ? intval($_POST['waybill_id']) : 0;
         $waybill_no_raw = isset($_POST['waybill_no']) ? $_POST['waybill_no'] : '';
-        
+
         // If waybill_no not provided but waybill_id is, get waybill_no from database
         if (empty($waybill_no_raw) && $waybill_id > 0) {
             $waybill_no_raw = $wpdb->get_var($wpdb->prepare(
@@ -3839,7 +4609,7 @@ class KIT_Waybills
                 $waybill_id
             ));
         }
-        
+
         if (empty($waybill_no_raw)) {
             if ($is_ajax) {
                 wp_send_json_error(['message' => 'Missing waybill_no or waybill_id']);
@@ -3893,7 +4663,7 @@ class KIT_Waybills
 
         // If this waybill was part of a parcel, check if we need to update or delete the parcel
         $parcel_id = isset($waybill->parcel_id) ? intval($waybill->parcel_id) : 0;
-        
+
         if ($parcel_id > 0) {
             $remaining_waybills = $wpdb->get_var($wpdb->prepare(
                 "SELECT COUNT(*) FROM $table_name WHERE parcel_id = %d",
@@ -3914,7 +4684,7 @@ class KIT_Waybills
                     $parcel_id
                 ));
                 $waybill_count = $remaining_waybills;
-                
+
                 $wpdb->update(
                     $parcels_table,
                     [
@@ -3932,7 +4702,7 @@ class KIT_Waybills
             if ($result !== false) {
                 // Get updated parcel totals if applicable
                 $response_data = ['message' => 'Waybill deleted successfully'];
-                
+
                 // Check if parcel was deleted
                 if (isset($parcel_deleted) && $parcel_deleted) {
                     $response_data['parcel_deleted'] = true;
@@ -3943,7 +4713,7 @@ class KIT_Waybills
                         "SELECT total_amount, total_waybills FROM $parcels_table WHERE id = %d",
                         $parcel_id
                     ), ARRAY_A);
-                    
+
                     if ($parcel_data) {
                         $response_data['parcel_totals'] = [
                             'total_amount' => floatval($parcel_data['total_amount']),
@@ -3951,7 +4721,7 @@ class KIT_Waybills
                         ];
                     }
                 }
-                
+
                 wp_send_json_success($response_data);
             } else {
                 wp_send_json_error(['message' => 'Failed to delete waybill']);
@@ -4018,7 +4788,7 @@ class KIT_Waybills
                 c.email_address,
                 c.city_id,
                 city.city_name AS customer_city,
-                c.company_name,
+                COALESCE(NULLIF(co.company_name, ''), NULLIF(cust_co.company_name, '')) AS company_name,
                 c.cell AS customer_cell,
                 d.delivery_reference,
                 d.direction_id,
@@ -4031,6 +4801,8 @@ class KIT_Waybills
                 dest.country_name AS destination_country
                 FROM $waybills_table b
                 LEFT JOIN $customers_table c ON b.customer_id = c.cust_id
+                LEFT JOIN {$wpdb->prefix}kit_company_customers co ON b.company_id = co.company_id
+                LEFT JOIN {$wpdb->prefix}kit_company_customers cust_co ON c.company_id = cust_co.company_id
                 LEFT JOIN $deliveries_table d ON b.delivery_id = d.id
                 LEFT JOIN $directions_table dir ON b.direction_id = dir.id
                 LEFT JOIN $countries_table origin ON dir.origin_country_id = origin.id
@@ -4044,6 +4816,8 @@ class KIT_Waybills
         if (!$waybill) {
             return null;
         }
+
+        self::merge_canonical_waybill_columns($waybill);
 
         // PHASE 2: Waybill Items
         // Use %s (string) instead of %d (integer) to properly match waybill numbers with letters (e.g., "4008a", "4008b")
@@ -4151,16 +4925,16 @@ class KIT_Waybills
             ? $mass_charge
             : $volume_charge;
 
-        $sad500_total = (!empty($waybill_data['include_sad500']) && intval($waybill_data['include_sad500']) === 1)
+        $sad500_total = (self::normalize_flag_int($waybill_data['include_sad500'] ?? 0) === 1)
             ? ($stored_sad500 > 0.0 ? $stored_sad500 : floatval(self::sadc_certificate()))
             : 0.0;
 
-        $sadc_total = (!empty($waybill_data['include_sadc']) && intval($waybill_data['include_sadc']) === 1)
+        $sadc_total = (self::normalize_flag_int($waybill_data['include_sadc'] ?? 0) === 1)
             ? ($stored_sadc > 0.0 ? $stored_sadc : floatval(self::sad()))
             : 0.0;
 
         $intl_amount = 0.0;
-        $vat_included = isset($waybill_data['vat_include']) ? intval($waybill_data['vat_include']) : 0;
+        $vat_included = self::normalize_flag_int($waybill_data['vat_include'] ?? 0);
         if ($vat_included === 0) {
             $intl_amount = $stored_intl_calc > 0.0
                 ? $stored_intl_calc
@@ -4216,7 +4990,7 @@ class KIT_Waybills
     public static function generate_qr_code_data($waybill_no)
     {
         global $wpdb;
-        
+
         $full = self::getFullWaybillWithItems($waybill_no);
         if (!$full || !isset($full->waybill)) {
             return '';
@@ -4229,10 +5003,10 @@ class KIT_Waybills
         $deliveries_table = $wpdb->prefix . 'kit_deliveries';
         $drivers_table = $wpdb->prefix . 'kit_drivers';
         $delivery_id = $waybill['delivery_id'] ?? 0;
-        
+
         $delivery_info = null;
         $driver_info = null;
-        
+
         if ($delivery_id > 0) {
             $delivery_info = $wpdb->get_row($wpdb->prepare(
                 "SELECT d.*, dr.name AS driver_name, dr.phone AS driver_phone 
@@ -4241,7 +5015,7 @@ class KIT_Waybills
                  WHERE d.id = %d",
                 $delivery_id
             ), ARRAY_A);
-            
+
             if ($delivery_info && !empty($delivery_info['driver_name'])) {
                 $driver_info = [
                     'name' => $delivery_info['driver_name'],
@@ -4258,7 +5032,7 @@ class KIT_Waybills
             'invoice_amount' => floatval($waybill['product_invoice_amount'] ?? 0),
             'created_at' => $waybill['created_at'] ?? '',
             'status' => $waybill['status'] ?? '',
-            
+
             // Customer Information
             'customer' => [
                 'id' => intval($waybill['customer_id'] ?? 0),
@@ -4269,7 +5043,7 @@ class KIT_Waybills
                 'address' => $waybill['address'] ?? '',
                 'city' => $waybill['customer_city'] ?? ''
             ],
-            
+
             // Delivery Information
             'delivery' => [
                 'reference' => $delivery_info['delivery_reference'] ?? '',
@@ -4277,17 +5051,17 @@ class KIT_Waybills
                 'dispatch_date' => $delivery_info['dispatch_date'] ?? $waybill['dispatch_date'] ?? '',
                 'status' => $delivery_info['status'] ?? $waybill['delivery_status'] ?? ''
             ],
-            
+
             // Driver Information (if available)
             'driver' => $driver_info,
-            
+
             // Route Information
             'route' => [
                 'description' => $waybill['route_description'] ?? '',
                 'origin_country' => $waybill['origin_country'] ?? '',
                 'destination_country' => $waybill['destination_country'] ?? ''
             ],
-            
+
             // Dimensions & Weight
             'dimensions' => [
                 'length_cm' => floatval($waybill['item_length'] ?? 0),
@@ -4296,7 +5070,7 @@ class KIT_Waybills
                 'total_mass_kg' => floatval($waybill['total_mass_kg'] ?? 0),
                 'total_volume_m3' => floatval($waybill['total_volume'] ?? 0)
             ],
-            
+
             // Charges
             'charges' => [
                 'mass_charge' => floatval($waybill['mass_charge'] ?? 0),
@@ -4305,11 +5079,11 @@ class KIT_Waybills
                 'items_total' => floatval($waybill['waybill_items_total'] ?? 0),
                 'final_total' => floatval($waybill['product_invoice_amount'] ?? 0)
             ],
-            
+
             // Items (if any)
             'items' => []
         ];
-        
+
         // Add waybill items if available
         if (!empty($items) && is_array($items)) {
             foreach ($items as $item) {
@@ -4321,7 +5095,7 @@ class KIT_Waybills
                 ];
             }
         }
-        
+
         // Use compact JSON to keep size small for storage and QR encoding
         return json_encode($qr_data, JSON_UNESCAPED_UNICODE);
     }
@@ -4337,7 +5111,7 @@ class KIT_Waybills
         if (empty($data)) {
             return '';
         }
-        
+
         try {
             require_once __DIR__ . '/../../vendor/autoload.php';
 
@@ -4351,10 +5125,10 @@ class KIT_Waybills
                 ->setErrorCorrectionLevel(\Endroid\QrCode\ErrorCorrectionLevel::High)
                 ->setSize($size)
                 ->setMargin(10);
-            
+
             $result = $writer->write($qrCode);
             $imageData = $result->getString();
-            
+
             return 'data:image/png;base64,' . base64_encode($imageData);
         } catch (\Throwable $e) {
             error_log('QR Code generation error: ' . $e->getMessage());
@@ -4507,9 +5281,9 @@ class KIT_Waybills
             'misc_total' => $misc_total,
             'waybill_items_total' => $computed_items_total > 0 ? $computed_items_total : floatval($wb['waybill_items_total'] ?? 0),
             'charge_basis' => $wb['charge_basis'] ?? 'auto',
-            'include_sad500' => intval($wb['include_sad500'] ?? 0) === 1,
-            'include_sadc' => intval($wb['include_sadc'] ?? 0) === 1,
-            'include_vat' => intval($wb['vat_include'] ?? 0) === 1,
+            'include_sad500' => self::normalize_flag_int($wb['include_sad500'] ?? 0) === 1,
+            'include_sadc' => self::normalize_flag_int($wb['include_sadc'] ?? 0) === 1,
+            'include_vat' => self::normalize_flag_int($wb['vat_include'] ?? 0) === 1,
         ];
 
         $breakdown = KIT_Bulletproof_Calculator::calculate_waybill_total($params);
@@ -4520,16 +5294,27 @@ class KIT_Waybills
 
         $updated = false;
         if (!$matches && $update_if_mismatch) {
-            // Update DB with authoritative calculated total
+            // Update DB with authoritative calculated total; zero fee columns when flags are off (stale sad500_amount is a common cause of wrong totals).
+            $wit = ($computed_items_total > 0 ? $computed_items_total : $wb['waybill_items_total']);
+            $update_data = [
+                'product_invoice_amount' => $calc_total,
+                'waybill_items_total' => $wit,
+            ];
+            $format = ['%f', '%f'];
+            if (self::normalize_flag_int($wb['include_sad500'] ?? 0) !== 1) {
+                $update_data['sad500_amount'] = 0.0;
+                $format[] = '%f';
+            }
+            if (self::normalize_flag_int($wb['include_sadc'] ?? 0) !== 1) {
+                $update_data['sadc_amount'] = 0.0;
+                $format[] = '%f';
+            }
             $wpdb->update(
                 $wpdb->prefix . 'kit_waybills',
-                [
-                    'product_invoice_amount' => $calc_total,
-                    'waybill_items_total' => ($computed_items_total > 0 ? $computed_items_total : $wb['waybill_items_total'])
-                ],
+                $update_data,
                 ['waybill_no' => $waybill_no],
-                ['%f', '%f'],
-                ['%d']
+                $format,
+                ['%s']
             );
             $updated = ($wpdb->rows_affected > 0);
         }
@@ -4585,7 +5370,7 @@ class KIT_Waybills
                 $client_invoice = sanitize_text_field($waybill->product_invoice_number);
             }
         }
-        
+
         foreach ($waybill_items as $item) {
             // Skip if required fields are missing
             if (empty($item['item_name']) || !isset($item['quantity']) || !isset($item['unit_price'])) {
@@ -4594,7 +5379,7 @@ class KIT_Waybills
 
             $quantity = intval($item['quantity']);
             $unit_price = floatval($item['unit_price']);
-            
+
             // Validate quantity and price (matching logic from save_or_update_waybill)
             if ($quantity <= 0 || $unit_price < 0) {
                 error_log(sprintf(
@@ -4605,9 +5390,9 @@ class KIT_Waybills
                 ));
                 continue;
             }
-            
+
             $subtotal = $quantity * $unit_price;
-            
+
             // ✅ ACCURACY FIX: Apply same validation as manual calculation
             // Items with subtotal over 999999.99 are excluded (matches line 2037 logic)
             if ($subtotal <= 999999.99) {
@@ -4621,7 +5406,7 @@ class KIT_Waybills
                 // Skip inserting this item to maintain consistency
                 continue;
             }
-            
+
             // Use client_invoice from item if provided, otherwise use waybill's product_invoice_number
             $item_client_invoice = !empty($item['client_invoice']) ? sanitize_text_field($item['client_invoice']) : $client_invoice;
 
@@ -4636,7 +5421,7 @@ class KIT_Waybills
                 'client_invoice' => $item_client_invoice,
                 'created_at'  => current_time('mysql'),
             ], [
-                '%d',
+                '%s',
                 '%s',
                 '%d',
                 '%f',
@@ -4646,7 +5431,7 @@ class KIT_Waybills
                 '%s',
                 '%s'
             ]);
-            
+
             if ($insert_result === false) {
                 error_log(sprintf(
                     "updateWaybillItems: Failed to insert item '%s' for waybill_no %s: %s",
@@ -4713,13 +5498,19 @@ class KIT_Waybills
         $move_to_warehouse  = !empty($_POST['move_to_warehouse']) && intval($_POST['move_to_warehouse']) === 1;
 
         if (!empty($waybill_id) && $posted_delivery_id > 0 && !$move_to_warehouse) {
-            // Assign to the selected delivery: clear warehouse flag, set status to assigned
+            $delivery_status = $wpdb->get_var($wpdb->prepare(
+                "SELECT status FROM {$wpdb->prefix}kit_deliveries WHERE id = %d",
+                $posted_delivery_id
+            ));
+            $mapped_status = class_exists('KIT_Deliveries')
+                ? KIT_Deliveries::map_delivery_status_to_waybill_status((string) $delivery_status)
+                : 'assigned';
             $wpdb->update(
                 $waybills_table,
                 [
                     'delivery_id'     => $posted_delivery_id,
                     'warehouse'       => 0,
-                    'status'          => 'assigned',
+                    'status'          => $mapped_status,
                     'last_updated_at' => current_time('mysql'),
                     'last_updated_by' => get_current_user_id(),
                 ],
@@ -4844,7 +5635,7 @@ class KIT_Waybills
 
             case 'items':
                 $item_count = is_array($value) ? count($value) : (int)$value;
-                return KIT_Commons::renderButton($item_count . ' item' . ($item_count !== 1 ? 's' : ''), 'ghost-primary', 'sm', [
+                return KIT_Commons::renderButton($item_count . ' item' . ($item_count !== 1 ? 's' : ''), 'ghost-primary', 'lg', [
                     'classes' => 'toggle-items flex items-center',
                     'data-item-id' => $item->id ?? '',
                     'icon' => '<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7"></path>',
@@ -4939,8 +5730,6 @@ class KIT_Waybills
         $row['soWhat'] = ($approval_ok && $status_ok) ? true : false;
         return $row;
     }
-
-    //if the waybill has status warehouse and 
 
     public static function delete_waybill($waybill_no, $waybill_id = null)
     {
@@ -5289,14 +6078,14 @@ function render_waybill_row($waybill, $columns, $current_user = null)
             case 'actions':
                 echo '<td>';
                 // View action (everyone)
-                echo KIT_Commons::renderButton('View', 'primary', 'sm', ['href' => admin_url('admin.php?page=08600-Waybill-view&waybill_id=' . $waybill['id']), 'gradient' => true]) . ' ';
+                echo KIT_Commons::renderButton('View', 'primary', 'lg', ['href' => admin_url('admin.php?page=08600-Waybill-view&waybill_id=' . $waybill['id']), 'gradient' => true]) . ' ';
                 // Generate Quotation (admin only)
                 if (in_array('administrator', $roles)) {
-                    echo KIT_Commons::renderButton('Generate Quotation', 'success', 'sm', ['href' => admin_url('admin.php?page=generate-quotation&waybill_id=' . $waybill['id']), 'gradient' => true]) . ' ';
+                    echo KIT_Commons::renderButton('Generate Quotation', 'success', 'lg', ['href' => admin_url('admin.php?page=generate-quotation&waybill_id=' . $waybill['id']), 'gradient' => true]) . ' ';
                 }
                 // Delete (admin only)
                 if (in_array('administrator', $roles)) {
-                    echo KIT_Commons::renderButton('Delete', 'danger', 'sm', ['href' => admin_url('admin-post.php?action=delete_waybill&waybill_id=' . $waybill['id']), 'onclick' => 'return confirm(\'Are you sure?\')', 'gradient' => true]);
+                    echo KIT_Commons::renderButton('Delete', 'danger', 'lg', ['href' => admin_url('admin-post.php?action=delete_waybill&waybill_id=' . $waybill['id']), 'onclick' => 'return confirm(\'Are you sure?\')', 'gradient' => true]);
                 }
                 echo '</td>';
                 break;

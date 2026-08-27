@@ -11,11 +11,12 @@ class KIT_Customers
     public static function init()
     {
         add_action('admin_post_update_customer', [self::class, 'handle_update_customer']);
+        add_action('admin_post_kit_merge_customers', [self::class, 'handle_merge_customers']);
+        // Customer records hold personal data (POPIA), so nothing here is exposed to
+        // logged-out requests.
         add_action('wp_ajax_save_customer_ajax', [self::class, 'handle_save_customer_ajax']);
-        add_action('wp_ajax_nopriv_save_customer_ajax', [self::class, 'handle_save_customer_ajax']);
         add_action('wp_ajax_test_customer_ajax', [self::class, 'test_customer_ajax']);
         add_action('wp_ajax_get_cities_by_country', [self::class, 'handle_get_cities_by_country']);
-        add_action('wp_ajax_nopriv_get_cities_by_country', [self::class, 'handle_get_cities_by_country']);
     }
     public static function gamaCustomer($id)
     {
@@ -32,27 +33,519 @@ class KIT_Customers
         return $wpdb->get_var("SELECT id FROM $table_name WHERE cust_id=" . $id);
     }
 
+    /** @var string|null Message when save/update is rejected (duplicate name or company). */
+    private static $last_customer_validation_error = null;
+
+    public static function get_last_customer_validation_error(): ?string
+    {
+        return self::$last_customer_validation_error;
+    }
+
+    private static function set_customer_validation_error(?string $message): void
+    {
+        self::$last_customer_validation_error = $message;
+    }
+
+    private static function normalize_customer_compare_string(string $value): string
+    {
+        $value = trim($value);
+        if ($value === '') {
+            return '';
+        }
+        if (function_exists('mb_strtolower')) {
+            return mb_strtolower($value, 'UTF-8');
+        }
+        return strtolower($value);
+    }
+
+    /** Strip accents / diacritics for stable name comparison. */
+    private static function strip_name_accents(string $value): string
+    {
+        if ($value === '') {
+            return '';
+        }
+        if (function_exists('iconv')) {
+            $trans = @iconv('UTF-8', 'ASCII//TRANSLIT//IGNORE', $value);
+            if (is_string($trans) && $trans !== '') {
+                $value = $trans;
+            }
+        }
+        return $value;
+    }
+
+    /**
+     * Particles / articles that should not create distinct people
+     * (e.g. "van den Berg" vs "Van Der Berg").
+     *
+     * @return list<string>
+     */
+    private static function person_name_particles(): array
+    {
+        return ['van', 'den', 'der', 'de', 'du', 'la', 'le', 'ter', 'ten', 'von', 'of', 'the', 'da', 'dos', 'das', 'del', 'di'];
+    }
+
+    /**
+     * Canonical person-name key: lowercase, no accents/punctuation, particles removed.
+     * "Edwin van den Berg" and "Edwin Van Der Berg" both become "edwin berg".
+     */
+    public static function normalize_person_name_key(string $name, string $surname = ''): string
+    {
+        $full = trim($name . ' ' . $surname);
+        $full = self::normalize_customer_compare_string($full);
+        $full = self::strip_name_accents($full);
+        $full = preg_replace('/[^a-z0-9\s]+/u', ' ', $full) ?? $full;
+        $full = preg_replace('/\s+/u', ' ', $full) ?? $full;
+        $full = trim($full);
+        if ($full === '') {
+            return '';
+        }
+
+        $particles = self::person_name_particles();
+        $tokens = preg_split('/\s+/u', $full) ?: [];
+        $kept = [];
+        foreach ($tokens as $token) {
+            $token = trim((string) $token);
+            if ($token === '' || in_array($token, $particles, true)) {
+                continue;
+            }
+            $kept[] = $token;
+        }
+
+        return implode(' ', $kept);
+    }
+
+    /**
+     * Display name without repeating a surname already in the given name
+     * ("Chris Joubert" + "Joubert" → "Chris Joubert").
+     */
+    public static function format_person_display_name(string $name, string $surname = ''): string
+    {
+        $name = trim($name);
+        $surname = trim($surname);
+        if ($name === '') {
+            return $surname;
+        }
+        if ($surname === '') {
+            return $name;
+        }
+
+        $name_l = self::normalize_customer_compare_string($name);
+        $surname_l = self::normalize_customer_compare_string($surname);
+        if ($surname_l === '' || $name_l === $surname_l) {
+            return $name;
+        }
+
+        $suffix = ' ' . $surname_l;
+        if (strlen($name_l) >= strlen($suffix) && substr($name_l, -strlen($suffix)) === $suffix) {
+            return $name;
+        }
+
+        return trim($name . ' ' . $surname);
+    }
+
+    /**
+     * Canonical company-name key: lowercase, no legal suffixes (ltd, pty, etc.).
+     */
+    public static function normalize_company_compare_key(string $company_name): string
+    {
+        $s = self::normalize_customer_compare_string($company_name);
+        $s = self::strip_name_accents($s);
+        $s = preg_replace('/[^a-z0-9\s]+/u', ' ', $s) ?? $s;
+        $s = preg_replace('/\s+/u', ' ', $s) ?? $s;
+        $s = trim($s);
+        if ($s === '') {
+            return '';
+        }
+
+        $suffixes = [
+            'proprietary limited',
+            'pty limited',
+            'pty ltd',
+            'pvt ltd',
+            'private limited',
+            'limited',
+            'ltd',
+            'inc',
+            'incorporated',
+            'llc',
+            'plc',
+            'cc',
+            'co',
+            'company',
+            'corp',
+            'corporation',
+        ];
+        foreach ($suffixes as $suffix) {
+            $needle = ' ' . $suffix;
+            if (strlen($s) >= strlen($needle) && substr($s, -strlen($needle)) === $needle) {
+                $s = trim(substr($s, 0, -strlen($needle)));
+            } elseif ($s === $suffix) {
+                $s = '';
+            }
+        }
+
+        return trim(preg_replace('/\s+/u', ' ', $s) ?? $s);
+    }
+
+    /**
+     * Near-duplicate check after normalization (typos / small spelling drift).
+     */
+    public static function customer_labels_are_similar(string $a, string $b): bool
+    {
+        $a = trim($a);
+        $b = trim($b);
+        if ($a === '' || $b === '') {
+            return false;
+        }
+        if ($a === $b) {
+            return true;
+        }
+
+        $len_a = strlen($a);
+        $len_b = strlen($b);
+        $max = max($len_a, $len_b);
+        $min = min($len_a, $len_b);
+        if ($min < 4 || $max <= 0) {
+            return false;
+        }
+        // Avoid matching short fragments to long multi-word company names.
+        if (($min / $max) < 0.55) {
+            return false;
+        }
+
+        similar_text($a, $b, $pct);
+        if ($pct >= 88.0) {
+            return true;
+        }
+
+        if (function_exists('levenshtein') && $max <= 255) {
+            $dist = levenshtein($a, $b);
+            if ($dist <= 2 && $max >= 8) {
+                return true;
+            }
+            if ($dist / $max <= 0.15) {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    /**
+     * Find existing individual customers that look like the same person.
+     *
+     * @return list<object{cust_id:int,name:string,surname:string,display:string,match:string}>
+     */
+    public static function find_similar_person_customers(string $name, string $surname, ?int $exclude_cust_id = null, int $limit = 8): array
+    {
+        $needle = self::normalize_person_name_key($name, $surname);
+        if ($needle === '') {
+            return [];
+        }
+
+        global $wpdb;
+        $table = $wpdb->prefix . 'kit_customers';
+        $rows = $wpdb->get_results("SELECT cust_id, name, surname FROM {$table}");
+        if (empty($rows)) {
+            return [];
+        }
+
+        $matches = [];
+        foreach ($rows as $row) {
+            $cust_id = (int) ($row->cust_id ?? 0);
+            if ($exclude_cust_id !== null && $cust_id === (int) $exclude_cust_id) {
+                continue;
+            }
+            $row_name = trim((string) ($row->name ?? ''));
+            $row_surname = trim((string) ($row->surname ?? ''));
+            $key = self::normalize_person_name_key($row_name, $row_surname);
+            if ($key === '') {
+                continue;
+            }
+
+            $match_type = '';
+            if ($key === $needle) {
+                $match_type = 'normalized';
+            } elseif (self::customer_labels_are_similar($needle, $key)) {
+                $match_type = 'similar';
+            } else {
+                continue;
+            }
+
+            $matches[] = (object) [
+                'cust_id' => $cust_id,
+                'name' => $row_name,
+                'surname' => $row_surname,
+                'display' => trim($row_name . ' ' . $row_surname),
+                'match' => $match_type,
+            ];
+            if (count($matches) >= $limit) {
+                break;
+            }
+        }
+
+        return $matches;
+    }
+
+    /** Company labels that may repeat across many customers (not enforced as unique). */
+    private static function company_is_exempt_from_unique_check(string $company_name): bool
+    {
+        $s = self::normalize_customer_compare_string($company_name);
+        if ($s === '' || in_array($s, ['individual', 'private'], true)) {
+            return true;
+        }
+        return in_array($s, ['n/a', 'na', 'none', '-', '--', 'null', '0'], true);
+    }
+
+    /**
+     * Another row already has this first + last name (exact or near-duplicate).
+     *
+     * @param int|null $exclude_cust_id Pass current cust_id when editing.
+     */
+    public static function customer_name_surname_exists(string $name, string $surname, ?int $exclude_cust_id = null): bool
+    {
+        $n = self::normalize_customer_compare_string($name);
+        $s = self::normalize_customer_compare_string($surname);
+        if ($n === '' && $s === '') {
+            return false;
+        }
+
+        global $wpdb;
+        $table = $wpdb->prefix . 'kit_customers';
+        $sql = "SELECT COUNT(*) FROM {$table} WHERE LOWER(TRIM(COALESCE(name,''))) = %s AND LOWER(TRIM(COALESCE(surname,''))) = %s";
+        $params = [$n, $s];
+        if ($exclude_cust_id !== null && (int) $exclude_cust_id > 0) {
+            $sql .= ' AND cust_id <> %d';
+            $params[] = (int) $exclude_cust_id;
+        }
+        if ((int) $wpdb->get_var($wpdb->prepare($sql, $params)) > 0) {
+            return true;
+        }
+
+        return !empty(self::find_similar_person_customers($name, $surname, $exclude_cust_id, 1));
+    }
+
+    /**
+     * JOIN kit_company_customers onto a kit_customers alias via company_id.
+     */
+    public static function customer_company_join_sql(string $customer_alias = 'c', string $company_alias = 'co'): string
+    {
+        global $wpdb;
+        return "LEFT JOIN {$wpdb->prefix}kit_company_customers {$company_alias} ON {$customer_alias}.company_id = {$company_alias}.company_id";
+    }
+
+    /**
+     * Resolve company_id from payload (explicit id, else company_name → ensure_company).
+     */
+    public static function resolve_company_id_from_payload(array $data): int
+    {
+        $company_id = isset($data['company_id']) ? (int) $data['company_id'] : 0;
+        if ($company_id > 0) {
+            return $company_id;
+        }
+        $company_name = trim(sanitize_text_field((string) ($data['company_name'] ?? '')));
+        if ($company_name === '' || !class_exists('KIT_Company_Customers') || KIT_Company_Customers::is_placeholder_company($company_name)) {
+            return 0;
+        }
+        return (int) KIT_Company_Customers::ensure_company($company_name);
+    }
+
+    /**
+     * Company label uniqueness lives on kit_company_customers.
+     *
+     * @param int|null $exclude_cust_id Unused; kept for call-site compatibility.
+     */
+    public static function company_name_exists(string $company_name, ?int $exclude_cust_id = null): bool
+    {
+        unset($exclude_cust_id);
+        if (!class_exists('KIT_Company_Customers')) {
+            return false;
+        }
+        return KIT_Company_Customers::company_name_exists($company_name, null);
+    }
+
+    /**
+     * When company_name is set: copy it into name only if the person name is empty
+     * (or is an incomplete prefix of the company, e.g. "Eye" vs "Eye Emporium").
+     */
+    public static function should_sync_name_to_company(string $name, string $surname, string $company_name): bool
+    {
+        $company_name = trim($company_name);
+        if ($company_name === '' || self::company_is_exempt_from_unique_check($company_name)) {
+            return false;
+        }
+
+        $name = trim($name);
+        $surname = trim($surname);
+        $full = trim($name . ' ' . $surname);
+
+        if ($full === '') {
+            return true;
+        }
+        if (strcasecmp($full, $company_name) === 0) {
+            return true;
+        }
+        if ($surname === '' && $name !== '' && strlen($name) < strlen($company_name) && stripos($company_name, $name) === 0) {
+            return true;
+        }
+
+        return false;
+    }
+
+    /**
+     * @return array{name:string,surname:string,company_name:string}
+     */
+    public static function finalize_customer_name_fields(string $name, string $surname, string $company_name): array
+    {
+        $name = trim($name);
+        $surname = trim($surname);
+        $company_name = trim($company_name);
+        if (self::company_is_exempt_from_unique_check($company_name)) {
+            $company_name = '';
+        }
+
+        if (self::should_sync_name_to_company($name, $surname, $company_name)) {
+            $name = $company_name;
+            $surname = '';
+        }
+
+        return [
+            'name' => $name,
+            'surname' => $surname,
+            'company_name' => $company_name,
+        ];
+    }
+
+    /** Person name for list/display — applies the same company sync rule as seed. */
+    public static function person_name_for_display(string $name, string $surname, string $company_name): string
+    {
+        $final = self::finalize_customer_name_fields($name, $surname, $company_name);
+        $display = trim($final['name'] . ' ' . $final['surname']);
+
+        return $display;
+    }
+
+    /**
+     * Fix stored name/surname when company_name is set but name is empty or a short prefix.
+     *
+     * @return int Rows updated
+     */
+    public static function repair_customer_name_company_fields(): int
+    {
+        global $wpdb;
+        $table = $wpdb->prefix . 'kit_customers';
+        $companies_t = $wpdb->prefix . 'kit_company_customers';
+        $rows = $wpdb->get_results(
+            "SELECT c.cust_id, c.name, c.surname, co.company_name
+             FROM {$table} c
+             LEFT JOIN {$companies_t} co ON c.company_id = co.company_id"
+        );
+        if (empty($rows)) {
+            return 0;
+        }
+
+        $updated = 0;
+        foreach ($rows as $row) {
+            $final = self::finalize_customer_name_fields(
+                trim((string) ($row->name ?? '')),
+                trim((string) ($row->surname ?? '')),
+                trim((string) ($row->company_name ?? ''))
+            );
+            $cur_name = trim((string) ($row->name ?? ''));
+            $cur_surname = trim((string) ($row->surname ?? ''));
+            if ($final['name'] === $cur_name && $final['surname'] === $cur_surname) {
+                continue;
+            }
+            $wpdb->update(
+                $table,
+                ['name' => $final['name'], 'surname' => $final['surname']],
+                ['cust_id' => (int) $row->cust_id],
+                ['%s', '%s'],
+                ['%d']
+            );
+            if ($wpdb->rows_affected > 0) {
+                $updated++;
+            }
+        }
+
+        return $updated;
+    }
+
+    /**
+     * Fix waybills that store kit_customers.id instead of cust_id in customer_id.
+     */
+    public static function repair_waybill_customer_id_links(): int
+    {
+        global $wpdb;
+        $customers_t = $wpdb->prefix . 'kit_customers';
+        $waybills_t = $wpdb->prefix . 'kit_waybills';
+
+        $rows = $wpdb->get_results(
+            "SELECT w.id AS waybill_pk, c.cust_id
+             FROM {$waybills_t} w
+             INNER JOIN {$customers_t} c ON w.customer_id = c.id
+             WHERE w.customer_id > 0 AND w.customer_id <> c.cust_id"
+        );
+        if (empty($rows)) {
+            return 0;
+        }
+
+        $updated = 0;
+        foreach ($rows as $row) {
+            $wpdb->update(
+                $waybills_t,
+                ['customer_id' => (int) $row->cust_id],
+                ['id' => (int) $row->waybill_pk],
+                ['%d'],
+                ['%d']
+            );
+            if ($wpdb->rows_affected > 0) {
+                $updated++;
+            }
+        }
+
+        return $updated;
+    }
+
+    /**
+     * SQL fragment: count waybills for customer c (matches cust_id; legacy id fallback).
+     */
+    public static function customer_waybill_count_sql(): string
+    {
+        global $wpdb;
+        $waybills_table = $wpdb->prefix . 'kit_waybills';
+
+        return "(SELECT COUNT(*)
+            FROM {$waybills_table} w
+            WHERE w.customer_id = c.cust_id
+               OR (w.customer_id = c.id AND c.id > 0 AND w.customer_id <> c.cust_id)
+        ) AS total_waybills";
+    }
+
     public static function save_customer($cust)
     {
         global $wpdb;
         $table_name = $wpdb->prefix . 'kit_customers';
 
-        // Optional debug (disabled in production)
-        // error_log('save_customer called with data: ' . print_r($cust, true));
+        self::set_customer_validation_error(null);
 
-        // First check if customer already exists
-        $existing_customer = $wpdb->get_row(
-            $wpdb->prepare(
-                "SELECT * FROM $table_name WHERE name = %s AND surname = %s",
-                sanitize_text_field($cust['name'] ?? $cust['customer_name'] ?? ''),
-                sanitize_text_field($cust['surname'] ?? $cust['customer_surname'] ?? '')
-            )
-        );
+        $name = sanitize_text_field($cust['name'] ?? $cust['customer_name'] ?? '');
+        $surname = sanitize_text_field($cust['surname'] ?? $cust['customer_surname'] ?? '');
 
-        if ($existing_customer) {
-            return $existing_customer->cust_id;
+        if (self::customer_name_surname_exists($name, $surname, null)) {
+            $similar = self::find_similar_person_customers($name, $surname, null, 3);
+            $hint = '';
+            if (!empty($similar)) {
+                $labels = array_map(static function ($m) {
+                    return trim(($m->display ?? '') . ' (#' . (int) $m->cust_id . ')');
+                }, $similar);
+                $hint = ' Existing: ' . implode(', ', $labels) . '. Use Merge to transfer waybills, or select the existing customer.';
+            }
+            self::set_customer_validation_error(
+                'A customer with this name (or a very similar spelling) already exists.' . $hint
+            );
+            return false;
         }
-
 
         // Sanitize location IDs from either customer_* or origin_* payloads.
         $country_raw = null;
@@ -69,33 +562,30 @@ class KIT_Customers
         }
         $country_id = ($country_raw !== null && $country_raw !== '') ? intval($country_raw) : 0;
         $city_id = ($city_raw !== null && $city_raw !== '') ? intval($city_raw) : null; // NULL for FK when empty
-        // Default empty company name to 'Individual'
-        $company_name = sanitize_text_field($cust['company_name'] ?? '');
-        if ($company_name === '') {
-            $company_name = 'Individual';
-        }
+        $company_id = self::resolve_company_id_from_payload($cust);
 
         // Handle email - convert empty string to null for database
         $email_address = isset($cust['email_address']) && trim($cust['email_address']) !== ''
             ? sanitize_email(trim($cust['email_address']))
             : null;
 
+        do {
+            $new_cust_id = wp_rand(1000, 9999);
+            $id_taken = (int) $wpdb->get_var($wpdb->prepare("SELECT COUNT(*) FROM {$table_name} WHERE cust_id = %d", $new_cust_id));
+        } while ($id_taken > 0);
+
         $cust_data = [
-            'cust_id'  => rand(1000, 9999),
-            'name'     => sanitize_text_field($cust['name'] ?? $cust['customer_name'] ?? ''),
-            'surname'  => sanitize_text_field($cust['surname'] ?? $cust['customer_surname'] ?? ''),
+            'cust_id'  => $new_cust_id,
+            'name'     => $name,
+            'surname'  => $surname,
             'cell'     => sanitize_text_field($cust['cell'] ?? ''),
             'email_address'  => $email_address,
             'address'  => sanitize_text_field($cust['address'] ?? ''),
             'country_id'  => $country_id,
             'city_id'  => $city_id,
-            'company_name'  => $company_name,
             'vat_number'  => sanitize_text_field($cust['vat_number'] ?? ''),
         ];
-
-        // Insert into DB
-        // Specify data types to allow NULL for city_id and email_address
-        $inserted = $wpdb->insert($table_name, $cust_data, [
+        $formats = [
             '%d',
             '%s',
             '%s',
@@ -105,13 +595,13 @@ class KIT_Customers
             '%d',
             ($city_id === null ? null : '%d'),
             '%s',
-            '%s'
-        ]);
+        ];
+        if (class_exists('KIT_Company_Customers') && KIT_Company_Customers::customers_have_company_id_column()) {
+            $cust_data['company_id'] = $company_id > 0 ? $company_id : null;
+            $formats[] = $company_id > 0 ? '%d' : '%s';
+        }
 
-        // Optional debug
-        // if ($inserted === false) {
-        //     error_log('Database error: ' . $wpdb->last_error);
-        // }
+        $inserted = $wpdb->insert($table_name, $cust_data, $formats);
 
         if ($inserted === false) {
             return false; // Insert failed
@@ -130,11 +620,27 @@ class KIT_Customers
     {
         global $wpdb;
         $table_name = $wpdb->prefix . 'kit_customers';
+        self::set_customer_validation_error(null);
+
+        $cust_id = (int) $cust_id;
+        if ($cust_id <= 0) {
+            self::set_customer_validation_error('Invalid customer.');
+            return false;
+        }
+
+        $row = $wpdb->get_row($wpdb->prepare("SELECT * FROM {$table_name} WHERE cust_id = %d", $cust_id));
+        if (!$row) {
+            self::set_customer_validation_error('Customer not found.');
+            return false;
+        }
 
         // Sanitize input data
         $update_data = [];
-        if (isset($data['company_name'])) {
-            $update_data['company_name'] = sanitize_text_field($data['company_name']);
+        if (array_key_exists('company_id', $data) || isset($data['company_name'])) {
+            $company_id = self::resolve_company_id_from_payload($data);
+            if (class_exists('KIT_Company_Customers') && KIT_Company_Customers::customers_have_company_id_column()) {
+                $update_data['company_id'] = $company_id > 0 ? $company_id : null;
+            }
         }
         if (isset($data['name'])) {
             $update_data['name'] = sanitize_text_field($data['name']);
@@ -155,28 +661,58 @@ class KIT_Customers
         }
         // Update country_id/city_id when provided (including 0 to clear)
         if (array_key_exists('country_id', $data)) {
-            $update_data['country_id'] = $data['country_id'] !== '' && $data['country_id'] !== null ? intval($data['country_id']) : null;
+            $cid = $data['country_id'];
+            $cid = ($cid !== '' && $cid !== null) ? (int) $cid : 0;
+            $update_data['country_id'] = $cid > 0 ? $cid : null;
         }
         if (array_key_exists('city_id', $data)) {
-            $update_data['city_id'] = $data['city_id'] !== '' && $data['city_id'] !== null ? intval($data['city_id']) : null;
+            $xid = $data['city_id'];
+            $xid = ($xid !== '' && $xid !== null) ? (int) $xid : 0;
+            $update_data['city_id'] = $xid > 0 ? $xid : null;
+        }
+        if (array_key_exists('vat_number', $data)) {
+            $update_data['vat_number'] = sanitize_text_field((string) $data['vat_number']);
+        }
+        if (array_key_exists('telephone', $data)) {
+            $update_data['telephone'] = sanitize_text_field((string) $data['telephone']);
         }
 
-        // Only update if there is data
-        if (!empty($update_data)) {
-            $updated = $wpdb->update(
-                $table_name,
-                $update_data,
-                ['cust_id' => intval($cust_id)]
-            );
-            if ($updated !== false && class_exists('Courier_Google_Sheets_Sync')) {
-                $row = $wpdb->get_row($wpdb->prepare("SELECT * FROM $table_name WHERE cust_id = %d", $cust_id));
-                if ($row) {
-                    Courier_Google_Sheets_Sync::sync_customer_update($row);
-                }
-            }
-            return $updated !== false;
+        if (empty($update_data)) {
+            return false;
         }
-        return false;
+
+        $eff_name = isset($update_data['name']) ? (string) $update_data['name'] : (string) ($row->name ?? '');
+        $eff_surname = isset($update_data['surname']) ? (string) $update_data['surname'] : (string) ($row->surname ?? '');
+        if (self::customer_name_surname_exists($eff_name, $eff_surname, $cust_id)) {
+            $similar = self::find_similar_person_customers($eff_name, $eff_surname, $cust_id, 3);
+            $hint = '';
+            if (!empty($similar)) {
+                $labels = array_map(static function ($m) {
+                    return trim(($m->display ?? '') . ' (#' . (int) $m->cust_id . ')');
+                }, $similar);
+                $hint = ' Existing: ' . implode(', ', $labels) . '. Merge duplicates instead of renaming into a clash.';
+            }
+            self::set_customer_validation_error(
+                'Another customer already uses this name (or a very similar spelling).' . $hint
+            );
+            return false;
+        }
+
+        $updated = $wpdb->update(
+            $table_name,
+            $update_data,
+            ['cust_id' => $cust_id]
+        );
+        if ($updated === false && $wpdb->last_error) {
+            self::set_customer_validation_error('Database error: ' . $wpdb->last_error);
+        }
+        if ($updated !== false && class_exists('Courier_Google_Sheets_Sync')) {
+            $row_after = $wpdb->get_row($wpdb->prepare("SELECT * FROM $table_name WHERE cust_id = %d", $cust_id));
+            if ($row_after) {
+                Courier_Google_Sheets_Sync::sync_customer_update($row_after);
+            }
+        }
+        return $updated !== false;
     }
 
     public static function handle_update_customer()
@@ -188,31 +724,44 @@ class KIT_Customers
         $cust_id = intval($_POST['cust_id'] ?? $_POST['customer_id'] ?? 0);
 
         $data = [
-            'company_name' => sanitize_text_field($_POST['company_name']),
-            'name'    => sanitize_text_field($_POST['name']),
-            'surname' => sanitize_text_field($_POST['surname']),
-            'cell'    => sanitize_text_field($_POST['cell']),
-            'address' => sanitize_textarea_field($_POST['address']),
-            'email_address' => sanitize_text_field($_POST['email_address']),
+            'name'    => sanitize_text_field($_POST['name'] ?? ''),
+            'surname' => sanitize_text_field($_POST['surname'] ?? ''),
+            'cell'    => sanitize_text_field($_POST['cell'] ?? ''),
+            'address' => sanitize_textarea_field($_POST['address'] ?? ''),
+            'email_address' => sanitize_text_field($_POST['email_address'] ?? ''),
+            'vat_number' => sanitize_text_field($_POST['vat_number'] ?? ''),
         ];
+        if (isset($_POST['company_id']) && (int) $_POST['company_id'] > 0) {
+            $data['company_id'] = (int) $_POST['company_id'];
+        }
 
-        // Handle field name mismatch: form submits 'origin_country' and 'origin_city'; include even when 0 so we can clear wrong values
+        // Match save_customer: empty country/city → NULL (not 0), so FK / city rows are not violated.
         if (isset($_POST['origin_country'])) {
-            $data['country_id'] = $_POST['origin_country'] !== '' ? intval($_POST['origin_country']) : 0;
+            $data['country_id'] = $_POST['origin_country'] !== '' ? (int) $_POST['origin_country'] : null;
         } elseif (isset($_POST['country_id'])) {
-            $data['country_id'] = $_POST['country_id'] !== '' ? intval($_POST['country_id']) : 0;
+            $data['country_id'] = $_POST['country_id'] !== '' ? (int) $_POST['country_id'] : null;
         }
         if (isset($_POST['origin_city'])) {
-            $data['city_id'] = $_POST['origin_city'] !== '' ? intval($_POST['origin_city']) : 0;
+            $data['city_id'] = $_POST['origin_city'] !== '' ? (int) $_POST['origin_city'] : null;
         } elseif (isset($_POST['city_id'])) {
-            $data['city_id'] = $_POST['city_id'] !== '' ? intval($_POST['city_id']) : 0;
+            $data['city_id'] = $_POST['city_id'] !== '' ? (int) $_POST['city_id'] : null;
         }
 
-        // 🔥 Call your method here
-        $updated = KIT_Customers::update_customer($cust_id, $data);
+        // Convert individual → company only when the admin explicitly checks the box.
+        $convert = !empty($_POST['kit_convert_to_company']);
+        if ($convert && class_exists('KIT_Company_Customers')) {
+            $data['company_name'] = sanitize_text_field($_POST['company_name'] ?? '');
+            $company_id = KIT_Company_Customers::convert_customer_to_company($cust_id, $data);
+            if ($company_id) {
+                wp_redirect(admin_url('admin.php?page=08600-customers&edit_company=' . (int) $company_id . '&converted=1'));
+                exit;
+            }
+            $msg = rawurlencode(KIT_Company_Customers::get_validation_error() ?: 'Could not convert customer to company.');
+            wp_redirect(admin_url('admin.php?page=edit-customer&edit_customer=' . $cust_id . '&update_error=1&msg=' . $msg));
+            exit;
+        }
 
-        //get the customer id
-        $id = KIT_Customers::idCustomer($cust_id);
+        $updated = KIT_Customers::update_customer($cust_id, $data);
 
         if ($updated) {
             // Redirect with success parameter (toast will be shown on redirected page)
@@ -220,7 +769,8 @@ class KIT_Customers
             exit;
         }
 
-
+        $msg = rawurlencode(self::get_last_customer_validation_error() ?: 'Could not update customer.');
+        wp_redirect(admin_url('admin.php?page=edit-customer&edit_customer=' . $cust_id . '&update_error=1&msg=' . $msg));
         exit;
     }
 
@@ -235,65 +785,45 @@ class KIT_Customers
             wp_send_json_error(['message' => 'Security check failed']);
         }
 
+        // A valid nonce only proves the request came from our form, not that the
+        // sender is staff — subscribers must not be able to write customer records.
+        if (!current_user_can('manage_options') && !current_user_can('kit_update_data')) {
+            wp_send_json_error(['message' => 'Insufficient permissions'], 403);
+        }
+
         // Check if required fields are present
-        if (empty($_POST['name']) || empty($_POST['surname']) || empty($_POST['cell']) || empty($_POST['company_name']) || empty($_POST['address'])) {
+        if (empty($_POST['name']) || empty($_POST['surname']) || empty($_POST['cell']) || empty($_POST['address'])) {
             error_log('Customer AJAX missing required fields');
-            wp_send_json_error(['message' => 'Please fill in all required fields (Company Name, First Name, Last Name, Cell, Address)']);
+            wp_send_json_error(['message' => 'Please fill in all required fields (First Name, Last Name, Cell, Address)']);
         }
 
-        global $wpdb;
-        $table_name = $wpdb->prefix . 'kit_customers';
+        $country_input = isset($_POST['country_id']) && $_POST['country_id'] !== '' ? $_POST['country_id'] : ($_POST['origin_country'] ?? '');
+        $city_input = isset($_POST['city_id']) && $_POST['city_id'] !== '' ? $_POST['city_id'] : ($_POST['origin_city'] ?? '');
 
-        // Generate a unique customer ID
-        do {
-            $cust_id = rand(1000, 9999);
-            $exists = $wpdb->get_var($wpdb->prepare("SELECT cust_id FROM $table_name WHERE cust_id = %d", $cust_id));
-        } while ($exists);
-
-        // Sanitize inputs
-        $company_name = sanitize_text_field($_POST['company_name'] ?? '');
-        if ($company_name === '') {
-            $company_name = 'Individual';
-        }
-
-        // Handle email - convert empty string to null for database
         $email_address = isset($_POST['email_address']) && trim($_POST['email_address']) !== ''
             ? sanitize_email(trim($_POST['email_address']))
             : null;
 
-        $country_input = isset($_POST['country_id']) && $_POST['country_id'] !== '' ? $_POST['country_id'] : ($_POST['origin_country'] ?? '');
-        $city_input = isset($_POST['city_id']) && $_POST['city_id'] !== '' ? $_POST['city_id'] : ($_POST['origin_city'] ?? '');
         $cust_data = [
-            'cust_id'  => $cust_id,
             'name'     => sanitize_text_field($_POST['name'] ?? ''),
             'surname'  => sanitize_text_field($_POST['surname'] ?? ''),
             'cell'     => sanitize_text_field($_POST['cell'] ?? ''),
             'address'  => sanitize_text_field($_POST['address'] ?? ''),
             'email_address' => $email_address,
-            'company_name' => $company_name,
             'country_id' => ($country_input !== '' ? intval($country_input) : 0),
             'city_id' => ($city_input !== '' ? intval($city_input) : 0),
             'vat_number' => sanitize_text_field($_POST['vat_number'] ?? ''),
         ];
 
-        // Insert into DB
-        $inserted = $wpdb->insert($table_name, $cust_data);
+        $new_id = self::save_customer($cust_data);
 
-        if ($inserted) {
-            if (class_exists('Courier_Google_Sheets_Sync')) {
-                $row = $wpdb->get_row($wpdb->prepare("SELECT * FROM $table_name WHERE cust_id = %d", $cust_id));
-                if ($row) {
-                    Courier_Google_Sheets_Sync::sync_customer_add($row);
-                }
-            }
-            wp_send_json_success(['message' => 'Customer saved successfully! 🎉', 'customer_id' => $cust_id]);
-        } else {
-            $error_message = 'Failed to save customer.';
-            if ($wpdb->last_error) {
-                $error_message .= ' Database Error: ' . $wpdb->last_error;
-            }
-            wp_send_json_error(['message' => $error_message]);
+        if ($new_id === false) {
+            wp_send_json_error([
+                'message' => self::get_last_customer_validation_error() ?: 'Could not save customer.',
+            ]);
         }
+
+        wp_send_json_success(['message' => 'Customer saved successfully! 🎉', 'customer_id' => $new_id]);
     }
 
     public static function test_customer_ajax()
@@ -564,6 +1094,216 @@ class KIT_Customers
         }
     }
 
+    /**
+     * Merge duplicate customer into keep: move waybills, retarget portal users, delete duplicate row.
+     * Does NOT delete waybills.
+     *
+     * @return array{ok:bool,message:string,waybills_moved:int,keep_cust_id:int,drop_cust_id:int}
+     */
+    public static function merge_customers(int $keep_cust_id, int $drop_cust_id): array
+    {
+        $keep_cust_id = (int) $keep_cust_id;
+        $drop_cust_id = (int) $drop_cust_id;
+        $result = [
+            'ok' => false,
+            'message' => '',
+            'waybills_moved' => 0,
+            'keep_cust_id' => $keep_cust_id,
+            'drop_cust_id' => $drop_cust_id,
+        ];
+
+        if ($keep_cust_id <= 0 || $drop_cust_id <= 0) {
+            $result['message'] = 'Invalid customer IDs.';
+            return $result;
+        }
+        if ($keep_cust_id === $drop_cust_id) {
+            $result['message'] = 'Cannot merge a customer into itself.';
+            return $result;
+        }
+
+        global $wpdb;
+        $customers_t = $wpdb->prefix . 'kit_customers';
+        $waybills_t = $wpdb->prefix . 'kit_waybills';
+
+        $keep = $wpdb->get_row($wpdb->prepare("SELECT * FROM {$customers_t} WHERE cust_id = %d", $keep_cust_id));
+        $drop = $wpdb->get_row($wpdb->prepare("SELECT * FROM {$customers_t} WHERE cust_id = %d", $drop_cust_id));
+        if (!$keep || !$drop) {
+            $result['message'] = 'One or both customers were not found.';
+            return $result;
+        }
+
+        // Move waybills linked by cust_id.
+        $wpdb->query($wpdb->prepare(
+            "UPDATE {$waybills_t} SET customer_id = %d WHERE customer_id = %d",
+            $keep_cust_id,
+            $drop_cust_id
+        ));
+        $moved = (int) $wpdb->rows_affected;
+
+        // Also fix legacy links that stored kit_customers.id instead of cust_id.
+        $drop_db_id = (int) ($drop->id ?? 0);
+        if ($drop_db_id > 0 && $drop_db_id !== $drop_cust_id) {
+            $wpdb->query($wpdb->prepare(
+                "UPDATE {$waybills_t} SET customer_id = %d WHERE customer_id = %d",
+                $keep_cust_id,
+                $drop_db_id
+            ));
+            $moved += (int) $wpdb->rows_affected;
+        }
+
+        // Retarget portal WordPress users from duplicate → keep.
+        $portal_users = get_users([
+            'meta_key' => 'kit_customer_id',
+            'meta_value' => $drop_cust_id,
+            'fields' => ['ID'],
+            'number' => 50,
+        ]);
+        foreach ($portal_users as $user) {
+            update_user_meta((int) $user->ID, 'kit_customer_id', $keep_cust_id);
+        }
+
+        if (class_exists('Courier_Google_Sheets_Sync')) {
+            Courier_Google_Sheets_Sync::sync_customer_delete($drop_cust_id, $drop_db_id);
+        }
+
+        $deleted = $wpdb->delete($customers_t, ['cust_id' => $drop_cust_id], ['%d']);
+        if (!$deleted) {
+            $result['message'] = 'Waybills may have been moved, but the duplicate customer could not be deleted.';
+            $result['waybills_moved'] = $moved;
+            return $result;
+        }
+
+        $result['ok'] = true;
+        $result['waybills_moved'] = $moved;
+        $keep_label = trim((string) ($keep->name ?? '') . ' ' . (string) ($keep->surname ?? ''));
+        $drop_label = trim((string) ($drop->name ?? '') . ' ' . (string) ($drop->surname ?? ''));
+        $result['message'] = sprintf(
+            'Merged “%s” into “%s”. Moved %d waybill(s) and removed the duplicate.',
+            $drop_label !== '' ? $drop_label : ('#' . $drop_cust_id),
+            $keep_label !== '' ? $keep_label : ('#' . $keep_cust_id),
+            $moved
+        );
+
+        return $result;
+    }
+
+    public static function handle_merge_customers()
+    {
+        if (!isset($_POST['kit_merge_nonce']) || !wp_verify_nonce(sanitize_text_field(wp_unslash($_POST['kit_merge_nonce'])), 'kit_merge_customers')) {
+            wp_die('Nonce verification failed');
+        }
+        if (!current_user_can('manage_options') && !current_user_can('administrator')) {
+            wp_die('Sorry, you are not allowed to merge customers.');
+        }
+
+        $keep = (int) ($_POST['keep_cust_id'] ?? 0);
+        $drop = (int) ($_POST['drop_cust_id'] ?? 0);
+        $result = self::merge_customers($keep, $drop);
+
+        $qs = [
+            'page' => '08600-customers',
+            'tab' => 'manage-customers',
+        ];
+        if ($result['ok']) {
+            $qs['merged'] = 1;
+            $qs['waybills_moved'] = (int) $result['waybills_moved'];
+            $qs['keep'] = $keep;
+        } else {
+            $qs['merge_error'] = 1;
+            $qs['msg'] = $result['message'] ?: 'Merge failed.';
+            $qs['merge_customer'] = $drop;
+        }
+
+        wp_safe_redirect(add_query_arg($qs, admin_url('admin.php')));
+        exit;
+    }
+
+    /**
+     * Admin UI: choose which customer to keep when merging a duplicate.
+     */
+    public static function render_merge_customer_form(int $drop_cust_id): void
+    {
+        global $wpdb;
+        $drop_cust_id = (int) $drop_cust_id;
+        $customers_t = $wpdb->prefix . 'kit_customers';
+        $waybills_t = $wpdb->prefix . 'kit_waybills';
+
+        $drop = $wpdb->get_row($wpdb->prepare("SELECT * FROM {$customers_t} WHERE cust_id = %d", $drop_cust_id));
+        if (!$drop) {
+            echo '<div class="notice notice-error"><p>Customer not found.</p></div>';
+            echo '<p><a href="' . esc_url(admin_url('admin.php?page=08600-customers')) . '">&larr; Back to customers</a></p>';
+            return;
+        }
+
+        $drop_name = trim((string) ($drop->name ?? '') . ' ' . (string) ($drop->surname ?? ''));
+        $drop_waybills = (int) $wpdb->get_var($wpdb->prepare(
+            "SELECT COUNT(*) FROM {$waybills_t} WHERE customer_id = %d",
+            $drop_cust_id
+        ));
+
+        $similar = self::find_similar_person_customers(
+            (string) ($drop->name ?? ''),
+            (string) ($drop->surname ?? ''),
+            $drop_cust_id,
+            20
+        );
+
+        $all = $wpdb->get_results($wpdb->prepare(
+            "SELECT c.cust_id, c.name, c.surname,
+                (SELECT COUNT(*) FROM {$waybills_t} w WHERE w.customer_id = c.cust_id) AS total_waybills
+             FROM {$customers_t} c
+             WHERE c.cust_id <> %d
+             ORDER BY c.name ASC, c.surname ASC
+             LIMIT 500",
+            $drop_cust_id
+        ));
+
+        $suggested_ids = [];
+        foreach ($similar as $m) {
+            $suggested_ids[(int) $m->cust_id] = true;
+        }
+
+        echo '<div class="wrap kit-merge-customer" style="max-width:720px;">';
+        echo '<h1>Merge duplicate customer</h1>';
+        echo '<p>Transfer all waybills from the duplicate into the customer you keep, then delete the duplicate. Waybills are <strong>not</strong> deleted.</p>';
+        echo '<div class="notice notice-info" style="padding:12px;"><p><strong>Duplicate (will be removed):</strong> '
+            . esc_html($drop_name !== '' ? $drop_name : ('#' . $drop_cust_id))
+            . ' · ' . esc_html((string) $drop_waybills) . ' waybill(s)</p></div>';
+
+        if (!empty($similar)) {
+            echo '<p><strong>Suggested matches</strong> (same person after normalizing spelling):</p><ul>';
+            foreach ($similar as $m) {
+                echo '<li>' . esc_html($m->display) . ' (#' . (int) $m->cust_id . ')</li>';
+            }
+            echo '</ul>';
+        }
+
+        echo '<form method="post" action="' . esc_url(admin_url('admin-post.php')) . '">';
+        echo '<input type="hidden" name="action" value="kit_merge_customers" />';
+        echo '<input type="hidden" name="drop_cust_id" value="' . esc_attr((string) $drop_cust_id) . '" />';
+        wp_nonce_field('kit_merge_customers', 'kit_merge_nonce');
+        echo '<p><label for="keep_cust_id"><strong>Keep this customer</strong></label><br />';
+        echo '<select name="keep_cust_id" id="keep_cust_id" required style="min-width:100%;max-width:100%;">';
+        echo '<option value="">— Select customer to keep —</option>';
+        foreach ($all as $row) {
+            $cid = (int) $row->cust_id;
+            $label = trim((string) ($row->name ?? '') . ' ' . (string) ($row->surname ?? ''));
+            if ($label === '') {
+                $label = '#' . $cid;
+            }
+            $wb = (int) ($row->total_waybills ?? 0);
+            $prefix = isset($suggested_ids[$cid]) ? '★ ' : '';
+            echo '<option value="' . esc_attr((string) $cid) . '">'
+                . esc_html($prefix . $label . ' (#' . $cid . ', ' . $wb . ' waybills)')
+                . '</option>';
+        }
+        echo '</select></p>';
+        echo '<p class="submit">';
+        echo '<button type="submit" class="button button-primary" onclick="return confirm(\'Move all waybills to the selected customer and delete the duplicate?\');">Merge &amp; delete duplicate</button> ';
+        echo '<a class="button" href="' . esc_url(admin_url('admin.php?page=08600-customers')) . '">Cancel</a>';
+        echo '</p></form></div>';
+    }
+
     public static function tholaMaCustomer()
     {
         global $wpdb;
@@ -582,13 +1322,16 @@ class KIT_Customers
             c.city_id,
             country.country_name,
             city.city_name,
-            c.company_name,
+            c.company_id,
+            co.company_name,
             COUNT(w.id) as total_waybills
         FROM $table_name c
         LEFT JOIN {$wpdb->prefix}kit_operating_countries country ON c.country_id = country.id
         LEFT JOIN {$wpdb->prefix}kit_operating_cities city ON c.city_id = city.id
+        LEFT JOIN {$wpdb->prefix}kit_company_customers co ON c.company_id = co.company_id
         LEFT JOIN $waybills_table w ON w.customer_id = c.cust_id
-        GROUP BY c.id, c.cust_id, c.name, c.surname, c.email_address, c.cell, c.address, c.country_id, c.city_id, country.country_name, city.city_name, c.company_name
+            OR (w.customer_id = c.id AND c.id > 0 AND w.customer_id <> c.cust_id)
+        GROUP BY c.id, c.cust_id, c.name, c.surname, c.email_address, c.cell, c.address, c.country_id, c.city_id, country.country_name, city.city_name, c.company_id, co.company_name
         ");
     }
 
@@ -823,6 +1566,46 @@ class KIT_Customers
             }
         }
 
+        // Handle merge duplicate customer UI
+        if (isset($_GET['merge_customer']) && !empty($_GET['merge_customer'])) {
+            if (!(current_user_can('manage_options') || current_user_can('administrator'))) {
+                wp_die('Sorry, you are not allowed to merge customers.');
+            }
+            self::render_merge_customer_form((int) $_GET['merge_customer']);
+            return;
+        }
+
+        // Handle delete company action
+        if (isset($_GET['delete_company']) && !empty($_GET['delete_company'])) {
+            $company_id = intval($_GET['delete_company']);
+            if (current_user_can('manage_options') || current_user_can('administrator')) {
+                if (class_exists('KIT_Company_Customers')) {
+                    KIT_Company_Customers::delete_company($company_id);
+                }
+                wp_redirect(admin_url('admin.php?page=08600-customers&company_deleted=1'));
+                exit;
+            }
+            wp_die('Sorry, you are not allowed to delete companies.');
+        }
+
+        // Handle edit company (inline on customers page)
+        if (isset($_GET['edit_company']) && !empty($_GET['edit_company']) && class_exists('KIT_Company_Customers')) {
+            if (!function_exists('kit_edit_company_form')) {
+                require_once dirname(__FILE__) . '/company-customers-functions.php';
+            }
+            kit_edit_company_form(intval($_GET['edit_company']));
+            return;
+        }
+
+        // Handle view company action
+        if (isset($_GET['view_company']) && !empty($_GET['view_company']) && class_exists('KIT_Company_Customers')) {
+            if (!function_exists('kit_view_company_detail')) {
+                require_once dirname(__FILE__) . '/company-customers-functions.php';
+            }
+            kit_view_company_detail(intval($_GET['view_company']));
+            return;
+        }
+
         // Handle view customer action
         if (isset($_GET['view_customer']) && !empty($_GET['view_customer'])) {
             customer_detail_view($_GET['view_customer']);
@@ -881,7 +1664,6 @@ class KIT_Customers
                     'cell' => sanitize_text_field($_POST['cell']),
                     'email_address' => sanitize_email($_POST['email_address']),
                     'address' => sanitize_textarea_field($_POST['address']),
-                    'company_name' => sanitize_text_field($_POST['company_name']),
                     'vat_number' => sanitize_text_field($_POST['vat_number'])
                 );
 
@@ -918,7 +1700,7 @@ class KIT_Customers
         $total_customers = is_array($customers) ? count($customers) : 0;
         $active_customers_count = is_array($customers)
             ? count(array_filter($customers, function ($c) {
-                return !empty($c->company_name);
+                return !empty($c->company_id) || !empty($c->company_name);
             }))
             : 0;
         $inactive_customers = max(0, $total_customers - $active_customers_count);
@@ -932,6 +1714,32 @@ class KIT_Customers
             }
             require_once plugin_dir_path(__FILE__) . '../components/toast.php';
             echo KIT_Toast::success($msg);
+        }
+
+        if (isset($_GET['merged']) && $_GET['merged'] == '1') {
+            if (!class_exists('KIT_Toast')) {
+                require_once plugin_dir_path(__FILE__) . '../components/toast.php';
+            }
+            KIT_Toast::ensure_toast_loads();
+            $moved = isset($_GET['waybills_moved']) ? (int) $_GET['waybills_moved'] : 0;
+            $keep = isset($_GET['keep']) ? (int) $_GET['keep'] : 0;
+            $msg = 'Customers merged successfully';
+            if ($moved > 0) {
+                $msg .= ' • Moved ' . $moved . ' waybill(s)';
+            }
+            if ($keep > 0) {
+                $msg .= ' • Kept #' . $keep;
+            }
+            echo KIT_Toast::success($msg, 'Merge complete');
+        }
+
+        if (isset($_GET['merge_error']) && $_GET['merge_error'] == '1') {
+            if (!class_exists('KIT_Toast')) {
+                require_once plugin_dir_path(__FILE__) . '../components/toast.php';
+            }
+            KIT_Toast::ensure_toast_loads();
+            $msg = isset($_GET['msg']) ? sanitize_text_field(wp_unslash($_GET['msg'])) : 'Merge failed.';
+            echo KIT_Toast::error($msg, 'Merge failed');
         }
 
         // Show success message if customer was just added
@@ -951,7 +1759,7 @@ class KIT_Customers
         // Get customer statistics
         $total_customers = count($customers);
         $active_customers = array_filter($customers, function ($c) {
-            return !empty($c->company_name);
+            return !empty($c->company_id) || !empty($c->company_name);
         });
         $active_customers_count = count($active_customers);
 
@@ -1032,123 +1840,244 @@ class KIT_Customers
                     });
                 }
 
-                // Get current page and items per page for pagination
-                $current_page = isset($_GET['paged']) ? max(1, intval($_GET['paged'])) : 1;
-                $items_per_page = isset($_GET['items_per_page']) ? max(5, min(100, intval($_GET['items_per_page']))) : 10;
-
-                // Define columns - Name first, then Company, then Country, then Total Waybills (styled like waybills table)
-                $columns = [
-                    'customer_name' => [
-                        'label' => 'Name',
-                        'sortable' => true,
-                        'searchable' => true,
-                        'header_class' => 'w-48 text-left max-w-48',
-                        'cell_class' => 'text-left w-48 max-w-48 text-xs',
-                        'callback' => function ($value, $row, $rowIndex) {
-                            // Handle both object and array formats, and both property naming conventions
-                            $name = '';
-                            $surname = '';
-                            if (is_object($row)) {
-                                $name = $row->customer_name ?? $row->name ?? '';
-                                $surname = $row->customer_surname ?? $row->surname ?? '';
-                            } elseif (is_array($row)) {
-                                $name = $row['customer_name'] ?? $row['name'] ?? '';
-                                $surname = $row['customer_surname'] ?? $row['surname'] ?? '';
-                            }
-                            $full_name = trim($name . ' ' . $surname);
-                            return esc_html($full_name ?: '—');
-                        }
-                    ],
-                    'company_name' => [
-                        'label' => 'Company',
-                        'sortable' => true,
-                        'searchable' => true,
-                        'header_class' => 'w-52 text-left max-w-52',
-                        'cell_class' => 'text-left w-52 max-w-52 text-xs truncate',
-                    ],
-                    'country_name' => [
-                        'label' => 'Country',
-                        'sortable' => true,
-                        'searchable' => true,
-                        'header_class' => 'w-32 text-left max-w-32',
-                        'cell_class' => 'text-left w-32 max-w-32 text-xs',
-                    ],
-                    'total_waybills' => [
-                        'label' => 'Total Waybills',
-                        'sortable' => true,
-                        'searchable' => false,
-                        'header_class' => 'w-24 text-center max-w-24',
-                        'cell_class' => 'text-center w-24 max-w-24 text-xs',
-                        'callback' => function ($value, $row, $rowIndex) {
-                            $count = 0;
-                            if (is_object($row)) {
-                                $count = intval($row->total_waybills ?? 0);
-                            } elseif (is_array($row)) {
-                                $count = intval($row['total_waybills'] ?? 0);
-                            }
-                            return '<span class="font-semibold">' . esc_html($count) . '</span>';
-                        }
-                    ],
-                ];
-
-                // Render table with fallback if unified table class is not available
-                if (class_exists('KIT_Unified_Table')) {
-
-                    echo KIT_Unified_Table::infinite($customers, $columns, [
-                        'title' => 'Manage Customers',
-                        'sync_entity' => 'customers',
-                        'actions' => [
-                            [
-                                'label' => '<span class="sr-only">Edit</span>' . KIT_Icon::svg('edit', 16),
-                                'is_html' => true,
-                                'title' => 'Edit customer',
-                                'href' => '?page=edit-customer&edit_customer={cust_id}',
-                                'class' => KIT_Icon::buttonClasses('blue', 'sm')
-                            ],
-                            'view' => [
-                                'label' => '<span class="sr-only">View</span>' . KIT_Icon::svg('eye', 16),
-                                'is_html' => true,
-                                'title' => 'View customer',
-                                'href' => '?page=08600-customers&view_customer={cust_id}',
-                                'class' => KIT_Icon::buttonClasses('green', 'sm')
-                            ],
-                            [
-                                'label' => '<span class="sr-only">Delete</span>' . KIT_Icon::svg('trash', 16),
-                                'is_html' => true,
-                                'title' => 'Delete customer',
-                                'href' => '?page=08600-customers&delete_customer={cust_id}',
-                                'class' => KIT_Icon::buttonClasses('red', 'sm'),
-                                'onclick' => 'return confirm("Are you sure you want to delete this customer? This will also delete all associated waybills.")'
-                            ]
-                        ],
-                        'searchable' => true,
-                        'sortable' => true,
-                        'selectable' => true,
-                        'bulk_actions' => true,
-                        'items_per_page' => $items_per_page,
-                        'current_page' => $current_page,
-                        'show_items_per_page' => true,
-                        'exportable' => true,
-                        'empty_message' => 'No customers found',
-                        'pagination' => true // Enable pagination
-                    ]);
-                } else {
-                    echo '<div class="overflow-x-auto">';
-                    echo KIT_Unified_Table::infinite($customers, $columns, [
-                        'title' => 'Customers',
-                        'sync_entity' => 'customers',
-                        'actions' => $actions,
-                    ]);
-                    echo '</div>';
-                    echo '</div>';
+                // --- Companies list ---
+                $companies_list = [];
+                if (class_exists('KIT_Company_Customers')) {
+                    $companies_result = KIT_Company_Customers::list_companies('', 500, 0);
+                    foreach ($companies_result['items'] as $co) {
+                        $obj = (object) $co;
+                        $obj->total_waybills = (int) ($co['total_waybills'] ?? 0);
+                        $companies_list[] = $obj;
+                    }
                 }
+
+                // Individuals = anyone with a real person name (mixed person+company stay visible).
+                // Pure company stubs (no person name) belong on the Companies list only.
+                $individual_customers = array_values(array_filter($customers, static function ($c) {
+                    $name = is_object($c)
+                        ? trim((string) ($c->customer_name ?? $c->name ?? ''))
+                        : trim((string) ($c['customer_name'] ?? $c['name'] ?? ''));
+                    $surname = is_object($c)
+                        ? trim((string) ($c->customer_surname ?? $c->surname ?? ''))
+                        : trim((string) ($c['customer_surname'] ?? $c['surname'] ?? ''));
+                    $person = trim($name . ' ' . $surname);
+                    if ($person !== '') {
+                        if (
+                            function_exists('kit_seed_customer_looks_like_business')
+                            && kit_seed_customer_looks_like_business($person)
+                            && trim((string) (is_object($c) ? ($c->company_name ?? '') : ($c['company_name'] ?? ''))) === ''
+                        ) {
+                            // Name field is itself a business label with no separate person — Companies list.
+                            return false;
+                        }
+                        return true;
+                    }
+                    $company = is_object($c) ? trim((string) ($c->company_name ?? '')) : trim((string) ($c['company_name'] ?? ''));
+                    if ($company === '') {
+                        return true;
+                    }
+                    if (class_exists('KIT_Company_Customers') && KIT_Company_Customers::is_placeholder_company($company)) {
+                        return true;
+                    }
+                    return false;
+                }));
+
+                $table_scroll_height = '60vh';
+                $btn = static function (string $variant, string $href, string $title, string $icon, string $onclick = '') {
+                    $attrs = 'href="' . esc_url($href) . '" class="' . esc_attr(KIT_Icon::buttonClasses($variant, 'sm')) . ' customers-list-action" title="' . esc_attr($title) . '" aria-label="' . esc_attr($title) . '"';
+                    if ($onclick !== '') {
+                        $attrs .= ' onclick="' . esc_attr($onclick) . '"';
+                    }
+                    return '<a ' . $attrs . '>' . KIT_Icon::svg($icon, 14) . '<span class="customers-list-action-label">' . esc_html($title) . '</span></a>';
+                };
+
+                // Build senior-friendly list rows (stacked fields — no side scroll)
+                $individual_rows = [];
+                foreach ($individual_customers as $c) {
+                    $name = trim((string) ($c->customer_name ?? $c->name ?? ''));
+                    $surname = trim((string) ($c->customer_surname ?? $c->surname ?? ''));
+                    $full_name = trim($name . ' ' . $surname) ?: '—';
+                    $country = trim((string) ($c->country_name ?? '')) ?: '—';
+                    $waybills = (int) ($c->total_waybills ?? 0);
+                    $cust_id = (int) ($c->cust_id ?? 0);
+                    // #region agent log
+                    if ($full_name === '—') {
+                        static $dbg_blank_rows = 0;
+                        if ($dbg_blank_rows < 10) {
+                            $dbg_blank_rows++;
+                            $dbg = [
+                                'sessionId' => '3f0725',
+                                'runId' => 'blank-cust',
+                                'hypothesisId' => 'C',
+                                'location' => 'customers-functions.php:individuals_list',
+                                'message' => 'rendering blank individual dash',
+                                'data' => [
+                                    'cust_id' => $cust_id,
+                                    'name' => $name,
+                                    'surname' => $surname,
+                                    'company_name' => trim((string) ($c->company_name ?? '')),
+                                    'waybills' => $waybills,
+                                    'db_empty' => ($name === '' && $surname === ''),
+                                ],
+                                'timestamp' => (int) round(microtime(true) * 1000),
+                            ];
+                            @file_put_contents(
+                                (defined('COURIER_FINANCE_PLUGIN_PATH') ? rtrim(COURIER_FINANCE_PLUGIN_PATH, "/\\") : dirname(__FILE__, 2)) . '/.cursor/debug-3f0725.log',
+                                json_encode($dbg) . "\n",
+                                FILE_APPEND
+                            );
+                        }
+                    }
+                    // #endregion
+                    $company_meta = trim((string) ($c->company_name ?? ''));
+                    if (
+                        $company_meta !== ''
+                        && class_exists('KIT_Company_Customers')
+                        && KIT_Company_Customers::is_placeholder_company($company_meta)
+                    ) {
+                        $company_meta = '';
+                    }
+                    $search = strtolower($full_name . ' ' . $company_meta . ' ' . $country . ' ' . $waybills);
+                    $meta_bits = array_values(array_filter([
+                        $company_meta !== '' ? $company_meta : '',
+                        $country !== '—' ? $country : '',
+                        $waybills . ' waybill' . ($waybills === 1 ? '' : 's'),
+                    ]));
+                    $individual_rows[] = [
+                        'search' => $search,
+                        'title' => $full_name,
+                        'lines' => [implode(' · ', $meta_bits)],
+                        'actions_html' => $btn('blue', '?page=edit-customer&edit_customer=' . $cust_id, 'Edit', 'edit')
+                            . $btn('green', '?page=08600-customers&view_customer=' . $cust_id, 'View', 'eye')
+                            . $btn('red', '?page=08600-customers&delete_customer=' . $cust_id, 'Delete', 'trash', 'return confirm("Delete this customer AND all their waybills?")'),
+                    ];
+                }
+
+                $company_rows = [];
+                foreach ($companies_list as $co) {
+                    $company_name = trim((string) ($co->company_name ?? '')) ?: '—';
+                    $cell = trim((string) ($co->cell ?? ''));
+                    $email = trim((string) ($co->email_address ?? ''));
+                    if (function_exists('kit_seed_is_sheet_error_value')) {
+                        if (kit_seed_is_sheet_error_value($cell)) {
+                            $cell = '';
+                        }
+                        if (kit_seed_is_sheet_error_value($email)) {
+                            $email = '';
+                        }
+                    }
+                    $cell = $cell !== '' ? $cell : '—';
+                    $email = $email !== '' ? $email : '—';
+                    $waybills = (int) ($co->total_waybills ?? 0);
+                    $company_id = (int) ($co->company_id ?? 0);
+                    $search = strtolower($company_name . ' ' . $cell . ' ' . $email . ' ' . $waybills);
+                    $meta_bits = array_values(array_filter([
+                        $cell !== '—' ? $cell : '',
+                        $email !== '—' ? $email : '',
+                        $waybills . ' waybill' . ($waybills === 1 ? '' : 's'),
+                    ]));
+                    $company_rows[] = [
+                        'search' => $search,
+                        'title' => $company_name,
+                        'lines' => [implode(' · ', $meta_bits)],
+                        'actions_html' => $btn('blue', '?page=08600-customers&edit_company=' . $company_id, 'Edit', 'edit')
+                            . $btn('green', '?page=08600-customers&view_company=' . $company_id, 'View', 'eye')
+                            . $btn('red', '?page=08600-customers&delete_company=' . $company_id, 'Delete', 'trash', 'return confirm("Delete this company?")'),
+                    ];
+                }
+
+                echo '<div class="customers-tables-side-by-side grid grid-cols-1 lg:grid-cols-2 gap-4 items-stretch mb-8">';
+                echo self::render_customers_list_panel('Individuals', $individual_rows, 'Search individuals…', $table_scroll_height, 'No individuals found');
+                echo self::render_customers_list_panel('Companies', $company_rows, 'Search companies…', $table_scroll_height, 'No companies found');
+                echo '</div>';
 
                 ?>
             </div>
         </div>
     <?php
     }
+
+    /**
+     * Senior-friendly searchable list panel (stacked rows, no horizontal scroll).
+     *
+     * @param array<int, array{search:string,title:string,lines:array<int,string>,actions_html:string}> $rows
+     */
+    private static function render_customers_list_panel(string $title, array $rows, string $placeholder, string $max_height, string $empty_message): string
+    {
+        $panel_id = 'customers-list-' . wp_unique_id();
+        $search_id = $panel_id . '-search';
+        $list_id = $panel_id . '-items';
+        $count = count($rows);
+
+        ob_start();
+        ?>
+        <div class="customers-table-panel customers-list-panel min-w-0 flex flex-col">
+            <div class="customers-list-card">
+                <div class="customers-list-header">
+                    <h3 class="customers-list-title"><?php echo esc_html($title); ?>
+                        <span class="customers-list-count" data-list-count="<?php echo esc_attr($list_id); ?>"><?php echo esc_html((string) $count); ?></span>
+                    </h3>
+                    <label class="customers-list-search" for="<?php echo esc_attr($search_id); ?>">
+                        <span class="sr-only"><?php echo esc_html($placeholder); ?></span>
+                        <svg class="customers-list-search-icon" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><circle cx="11" cy="11" r="8"/><path d="M21 21l-4.3-4.3"/></svg>
+                        <input type="search" id="<?php echo esc_attr($search_id); ?>" class="customers-list-search-input" placeholder="<?php echo esc_attr($placeholder); ?>" autocomplete="off" data-list-target="<?php echo esc_attr($list_id); ?>">
+                    </label>
+                </div>
+                <div class="customers-list-scroll" id="<?php echo esc_attr($list_id); ?>" style="max-height:<?php echo esc_attr($max_height); ?>;">
+                    <?php if ($count === 0): ?>
+                        <p class="customers-list-empty"><?php echo esc_html($empty_message); ?></p>
+                    <?php else: ?>
+                        <?php foreach ($rows as $index => $row): ?>
+                            <div class="customers-list-row" data-search="<?php echo esc_attr($row['search']); ?>">
+                                <div class="customers-list-index" aria-hidden="true"><?php echo esc_html((string) ($index + 1)); ?></div>
+                                <div class="customers-list-body">
+                                    <div class="customers-list-name"><?php echo esc_html($row['title']); ?></div>
+                                    <?php foreach ($row['lines'] as $line): ?>
+                                        <?php if (trim((string) $line) === '' || trim((string) $line) === '—') { continue; } ?>
+                                        <div class="customers-list-meta"><?php echo esc_html($line); ?></div>
+                                    <?php endforeach; ?>
+                                </div>
+                                <div class="customers-list-actions">
+                                    <?php echo $row['actions_html']; // phpcs:ignore WordPress.Security.EscapeOutput.OutputNotEscaped — built with esc_* above ?>
+                                </div>
+                            </div>
+                        <?php endforeach; ?>
+                        <p class="customers-list-empty customers-list-no-match" hidden>No matches</p>
+                    <?php endif; ?>
+                </div>
+            </div>
+        </div>
+        <script>
+        (function () {
+            var input = document.getElementById(<?php echo wp_json_encode($search_id); ?>);
+            var list = document.getElementById(<?php echo wp_json_encode($list_id); ?>);
+            if (!input || !list) return;
+            var rows = list.querySelectorAll('.customers-list-row');
+            var noMatch = list.querySelector('.customers-list-no-match');
+            var countEl = document.querySelector('[data-list-count="' + list.id + '"]');
+            input.addEventListener('input', function () {
+                var q = (input.value || '').toLowerCase().trim();
+                var visible = 0;
+                rows.forEach(function (row, i) {
+                    var hay = row.getAttribute('data-search') || '';
+                    var show = !q || hay.indexOf(q) !== -1;
+                    row.hidden = !show;
+                    if (show) {
+                        visible++;
+                        var idx = row.querySelector('.customers-list-index');
+                        if (idx) idx.textContent = String(visible);
+                    }
+                });
+                if (noMatch) noMatch.hidden = visible > 0 || rows.length === 0;
+                if (countEl) countEl.textContent = String(visible);
+            });
+        })();
+        </script>
+        <?php
+        return (string) ob_get_clean();
+    }
 }
+
 // Initialize
 KIT_Customers::init();
 
@@ -1445,12 +2374,6 @@ function save_customer()
     } while ($exists);
 
     // Sanitize inputs
-    // Default empty company name to 'Individual'
-    $company_name = sanitize_text_field($_POST['company_name'] ?? '');
-    if ($company_name === '') {
-        $company_name = 'Individual';
-    }
-
     $country_input = isset($_POST['country_id']) && $_POST['country_id'] !== '' ? $_POST['country_id'] : ($_POST['origin_country'] ?? '');
     $city_input = isset($_POST['city_id']) && $_POST['city_id'] !== '' ? $_POST['city_id'] : ($_POST['origin_city'] ?? '');
     $cust_data = [
@@ -1460,10 +2383,15 @@ function save_customer()
         'cell'     => sanitize_text_field($_POST['cell']),
         'address'  => sanitize_text_field($_POST['address']),
         'email_address' => sanitize_text_field($_POST['email_address'] ?? ''),
-        'company_name' => $company_name,
         'country_id' => ($country_input !== '' ? intval($country_input) : 0),
         'city_id' => ($city_input !== '' ? intval($city_input) : 0),
     ];
+    if (class_exists('KIT_Customers')) {
+        $company_id = KIT_Customers::resolve_company_id_from_payload($_POST);
+        if ($company_id > 0) {
+            $cust_data['company_id'] = $company_id;
+        }
+    }
 
     // Insert into DB
     $inserted = $wpdb->insert($table_name, $cust_data);
@@ -1492,70 +2420,72 @@ function save_customer()
     }
 }
 
-function customer_detail_view($customer_id)
+/**
+ * Default render options for staff (wp-admin customer detail).
+ *
+ * @return array<string,mixed>
+ */
+function kit_customer_detail_view_default_options_staff()
 {
-    global $wpdb;
-    $customer_id = intval($customer_id);
+    return array(
+        'context' => 'staff',
+        'back_url' => admin_url('admin.php?page=08600-customers'),
+        'allow_bulk_actions' => true,
+        'allow_row_delete' => true,
+        'allow_edit_customer' => true,
+        'allow_primary_waybills_link' => true,
+        'outer_wrap_class' => 'wrap',
+        'allow_customer_summary_pdf' => true,
+        'allow_waybill_invoice_pdf' => true,
+    );
+}
 
-    // Handle bulk actions
-    if (isset($_POST['bulk_action']) && isset($_POST['bulk_ids']) && !empty($_POST['bulk_ids'])) {
-        if (!current_user_can('kit_view_waybills')) {
-            wp_die('Unauthorized');
+/**
+ * Default render options for frontend customer portal (single linked cust_id).
+ *
+ * @return array<string,mixed>
+ */
+function kit_customer_detail_view_default_options_portal()
+{
+    return array(
+        'context' => 'portal',
+        'back_url' => '',
+        'allow_bulk_actions' => false,
+        'allow_row_delete' => false,
+        'allow_edit_customer' => true,
+        'allow_primary_waybills_link' => false,
+        'outer_wrap_class' => 'kit-customer-portal-detail',
+        'allow_customer_summary_pdf' => false,
+        'allow_waybill_invoice_pdf' => false,
+    );
+}
+
+/**
+ * Render customer detail + waybill table (staff or portal).
+ *
+ * @param int   $customer_id kit_customers.cust_id
+ * @param array $opts        Merged with defaults from context.
+ */
+function kit_customer_detail_view_render($customer_id, array $opts = array())
+{
+    $customer_id = (int) $customer_id;
+    $defaults = (($opts['context'] ?? '') === 'portal')
+        ? kit_customer_detail_view_default_options_portal()
+        : kit_customer_detail_view_default_options_staff();
+    $opts = array_merge($defaults, $opts);
+
+    if ($opts['context'] === 'portal') {
+        if (!is_user_logged_in() || !KIT_User_Roles::is_portal_customer() || !KIT_User_Roles::can_access_customer_portal()) {
+            echo '<p>' . esc_html__('Access denied.', '08600-services-quotations') . '</p>';
+            return;
         }
-
-        $bulk_action = sanitize_text_field($_POST['bulk_action']);
-        $bulk_ids = sanitize_text_field($_POST['bulk_ids']);
-        $waybill_nos = array_map('trim', explode(',', $bulk_ids));
-        $waybill_nos = array_filter($waybill_nos);
-
-        if (!empty($waybill_nos)) {
-            $deleted_count = 0;
-            $export_count = 0;
-
-            if ($bulk_action === 'delete') {
-                // Verify nonce if provided
-                if (isset($_POST['bulk_nonce'])) {
-                    if (!wp_verify_nonce($_POST['bulk_nonce'], 'bulk_waybill_nonce')) {
-                        wp_die('Security check failed');
-                    }
-                }
-
-                // Delete selected waybills
-                if (class_exists('KIT_Waybills')) {
-                    foreach ($waybill_nos as $waybill_no) {
-                        if (KIT_Waybills::delete_waybill($waybill_no)) {
-                            $deleted_count++;
-                        }
-                    }
-                }
-
-                if ($deleted_count > 0) {
-                    if (class_exists('KIT_Toast')) {
-                        KIT_Toast::ensure_toast_loads();
-                        echo KIT_Toast::success("Successfully deleted {$deleted_count} waybill(s).", 'Bulk Delete');
-                    }
-                    // Redirect to avoid resubmission
-                    wp_safe_redirect(admin_url('admin.php?page=08600-customers&view_customer=' . $customer_id . '&bulk_deleted=' . $deleted_count));
-                    exit;
-                }
-            } elseif ($bulk_action === 'export') {
-                // Handle bulk export - generate concatenated invoice PDF using pdf-customer-bulk.php
-                // Go up 2 levels from includes/customers/ to plugin root
-                $plugin_url = dirname(dirname(plugin_dir_url(__FILE__)));
-                // Use pdf-customer-bulk.php for bulk customer invoices
-                $pdf_url = add_query_arg([
-                    'selected_ids' => implode(',', $waybill_nos),
-                    'customer_id' => $customer_id
-                ], $plugin_url . '/pdf-customer-bulk.php');
-
-                // Redirect to PDF generator which will stream the PDF
-                wp_redirect($pdf_url);
-                exit;
-            }
+        $linked = KIT_User_Roles::get_portal_customer_id();
+        if ($linked !== $customer_id) {
+            echo '<p>' . esc_html__('Access denied.', '08600-services-quotations') . '</p>';
+            return;
         }
     }
 
-    // Handle success/error messages
     if (isset($_GET['updated']) && $_GET['updated'] == '1') {
         if (class_exists('KIT_Toast')) {
             KIT_Toast::ensure_toast_loads();
@@ -1577,7 +2507,6 @@ function customer_detail_view($customer_id)
         }
     }
 
-    // Get customer details
     $customer = get_customer_details($customer_id);
 
     if (!$customer) {
@@ -1588,51 +2517,51 @@ function customer_detail_view($customer_id)
         return;
     }
 
-    // Get waybills for this customer, enriched with delivery and city info
-    $waybills = [];
+    $waybills = array();
     if (class_exists('KIT_Waybills')) {
         $all_waybills = KIT_Waybills::getAllWaybills();
         foreach ($all_waybills as $wb) {
-            if ((int)($wb->customer_id ?? 0) === (int)$customer_id) {
+            if ((int) ($wb->customer_id ?? 0) === (int) $customer_id) {
                 $waybills[] = $wb;
             }
         }
     }
 
-?>
-    <div class="wrap">
-        <div class="<?php echo KIT_Commons::containerClasses(); ?>">
+    $outer_class = $opts['outer_wrap_class'] ? esc_attr($opts['outer_wrap_class']) : 'wrap';
+    ?>
+    <div class="<?php echo $outer_class; ?> kit-customer-detail-view">
+        <div class="<?php echo KIT_Commons::containerClasses(); ?> min-w-0 max-w-full">
             <?php
-            echo KIT_Commons::showingHeader([
-                'title' => 'Customer Details',
-                'desc'  => KIT_Commons::kitButton([
-                    'color' => 'green',
-                    'href'  => admin_url('admin.php?page=08600-customers')
-                ], 'Back'),
-            ]);
+            if (!empty($opts['back_url'])) {
+                echo KIT_Commons::showingHeader(array(
+                    'title' => 'Customer Details',
+                    'desc'  => KIT_Commons::kitButton(array(
+                        'color' => 'green',
+                        'href'  => $opts['back_url'],
+                    ), 'Back'),
+                ));
+            }
             ?>
 
-
-            <div class="grid grid-cols-1 md:grid-cols-5 gap-6">
-                <!-- Customer Information Card -->
-                <div class="col-span-1 md:col-span-2 bg-white border border-gray-200 shadow-sm rounded-xl p-4 md:p-6 mb-6">
+            <div class="kit-customer-detail-grid grid grid-cols-1 lg:grid-cols-2 gap-4 md:gap-6">
+                <div class="kit-customer-detail-info min-w-0 bg-white border border-gray-200 shadow-sm rounded-xl p-4 md:p-6 mb-2 lg:mb-6">
                     <?php
                     $customer_full_name = trim(($customer['customer_name'] ?? '') . ' ' . ($customer['customer_surname'] ?? ''));
                     $customer_full_name = $customer_full_name !== '' ? $customer_full_name : 'Not provided';
                     $customer_company_name = !empty($customer['company_name']) ? $customer['company_name'] : 'Individual';
                     ?>
                     <div class="flex flex-wrap items-start justify-between gap-3 mb-5">
-                        <div>
+                        <div class="min-w-0 flex-1">
                             <h2 class="text-xl md:text-2xl font-semibold text-gray-900 tracking-tight">Customer Information</h2>
                             <p class="text-sm text-gray-500 mt-1">Contact and location details</p>
                         </div>
-                        <span class="inline-flex items-center rounded-full bg-blue-50 text-blue-700 px-3 py-1 text-xs font-semibold">
+                        <span class="inline-flex items-center rounded-full bg-blue-50 text-blue-700 px-3 py-1 text-xs font-semibold shrink-0">
                             <?php echo esc_html($customer_company_name); ?>
                         </span>
                     </div>
 
-                    <div class="grid grid-cols-1 sm:grid-cols-1 md:grid-cols-2 gap-4 md:gap-5">
-                        <section class="rounded-lg border border-gray-100 bg-gray-50 p-4">
+                    <div class="grid grid-cols-1 lg:grid-cols-2 gap-4 md:gap-5">
+                        <section class="rounded-lg border border-gray-100 bg-gray-50 p-4 min-w-0">
                             <h3 class="text-base font-semibold text-gray-800 mb-4">Personal Details</h3>
                             <dl class="space-y-4">
                                 <div>
@@ -1650,7 +2579,7 @@ function customer_detail_view($customer_id)
                             </dl>
                         </section>
 
-                        <section class="rounded-lg border border-gray-100 bg-gray-50 p-4">
+                        <section class="rounded-lg border border-gray-100 bg-gray-50 p-4 min-w-0">
                             <h3 class="text-base font-semibold text-gray-800 mb-4">Location</h3>
                             <dl class="space-y-4">
                                 <div>
@@ -1669,58 +2598,69 @@ function customer_detail_view($customer_id)
                         </section>
                     </div>
 
-                    <div class="mt-6 pt-4 border-t border-gray-200 flex flex-col sm:flex-row sm:justify-end gap-2">
-                        <!-- Download PDF customer summary, like waybill summary pdf -->
+                    <div class="mt-6 pt-4 border-t border-gray-200 flex flex-col sm:flex-row sm:flex-wrap sm:justify-end gap-2">
                         <?php
-                        // Get all waybill numbers for this customer to generate PDF URL directly
-                        global $wpdb;
-                        $waybills_table = $wpdb->prefix . 'kit_waybills';
-                        $waybill_nos = $wpdb->get_col($wpdb->prepare(
-                            "SELECT waybill_no FROM $waybills_table WHERE customer_id = %d ORDER BY waybill_no ASC",
-                            $customer_id
-                        ));
+                        if (!empty($opts['allow_customer_summary_pdf'])) {
+                            global $wpdb;
+                            $waybills_table = $wpdb->prefix . 'kit_waybills';
+                            $waybill_nos = $wpdb->get_col($wpdb->prepare(
+                                "SELECT waybill_no FROM $waybills_table WHERE customer_id = %d ORDER BY waybill_no ASC",
+                                $customer_id
+                            ));
 
-                        $pdf_url = '';
-                        if (!empty($waybill_nos)) {
-                            // Generate PDF URL directly (go up 2 levels from includes/customers/ to plugin root)
-                            $plugin_url = dirname(dirname(plugin_dir_url(__FILE__)));
-                            $pdf_url = add_query_arg([
-                                'selected_ids' => implode(',', $waybill_nos),
-                                'customer_id' => $customer_id
-                            ], $plugin_url . '/pdf-customer-bulk.php');
+                            $pdf_url = '';
+                            if (!empty($waybill_nos)) {
+                                $plugin_url = dirname(dirname(plugin_dir_url(__FILE__)));
+                                $pdf_url = add_query_arg(array(
+                                    'selected_ids' => implode(',', $waybill_nos),
+                                    'customer_id' => $customer_id,
+                                ), $plugin_url . '/pdf-customer-bulk.php');
+                            }
+
+                            $pdf_icon = '<svg class="inline-block ml-1 -mt-0.5 w-4 h-4" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 20 20"><path d="M12 16v-4m0 4l-2-2m2 2l2-2M6 2a2 2 0 00-2 2v12a2 2 0 002 2h8a2 2 0 002-2V6.828a2 2 0 00-.586-1.414l-3.828-3.828A2 2 0 0012.172 2H6z"></path></svg>';
+
+                            if (!empty($pdf_url)) {
+                                echo KIT_Commons::renderButton('Download PDF', 'primary', 'md', array(
+                                    'href' => $pdf_url,
+                                    'gradient' => true,
+                                    'icon' => $pdf_icon,
+                                    'target' => '_blank',
+                                    'rel' => 'noopener',
+                                    'classes' => 'w-full sm:w-auto justify-center',
+                                ));
+                            } else {
+                                echo KIT_Commons::renderButton('Download PDF', 'primary', 'md', array(
+                                    'href' => '#',
+                                    'gradient' => true,
+                                    'icon' => $pdf_icon,
+                                    'disabled' => true,
+                                    'title' => 'No waybills available for this customer',
+                                    'classes' => 'w-full sm:w-auto justify-center',
+                                ));
+                            }
                         }
-
-                        $pdf_icon = '<svg class="inline-block ml-1 -mt-0.5 w-4 h-4" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 20 20"><path d="M12 16v-4m0 4l-2-2m2 2l2-2M6 2a2 2 0 00-2 2v12a2 2 0 002 2h8a2 2 0 002-2V6.828a2 2 0 00-.586-1.414l-3.828-3.828A2 2 0 0012.172 2H6z"></path></svg>';
-
-                        if (!empty($pdf_url)) {
-                            echo KIT_Commons::renderButton('Download PDF', 'primary', 'md', [
-                                'href' => $pdf_url,
-                                'gradient' => true,
-                                'icon' => $pdf_icon,
-                                'target' => '_blank',
-                                'rel' => 'noopener',
-                                'classes' => 'w-full sm:w-auto justify-center'
-                            ]);
-                        } else {
-                            echo KIT_Commons::renderButton('Download PDF', 'primary', 'md', [
-                                'href' => '#',
-                                'gradient' => true,
-                                'icon' => $pdf_icon,
-                                'disabled' => true,
-                                'title' => 'No waybills available for this customer',
-                                'classes' => 'w-full sm:w-auto justify-center'
-                            ]);
+                        if (!empty($opts['allow_edit_customer'])) {
+                            if (($opts['context'] ?? '') === 'portal' && function_exists('kit_customer_dashboard_url')) {
+                                $edit_href = add_query_arg('edit_profile', '1', kit_customer_dashboard_url());
+                                $edit_label = __('Edit your details', '08600-services-quotations');
+                            } else {
+                                $edit_href = '?page=08600-customers&edit_customer=' . $customer_id;
+                                $edit_label = __('Edit Customer', '08600-services-quotations');
+                            }
+                            echo KIT_Commons::renderButton($edit_label, 'ghost-primary', 'md', array(
+                                'href' => $edit_href,
+                                'classes' => 'w-full sm:w-auto justify-center',
+                            ));
                         }
                         ?>
-                        <?php echo KIT_Commons::renderButton('Edit Customer', 'ghost-primary', 'md', ['href' => '?page=08600-customers&edit_customer=' . $customer_id, 'classes' => 'w-full sm:w-auto justify-center']); ?>
                     </div>
                 </div>
-                <div class="col-span-1 md:col-span-3">
+                <div class="kit-customer-detail-waybills min-w-0 max-w-full">
                     <?php
-                    // Define actions for the unified table
                     $summary_url = plugins_url('pdf-summary.php', dirname(dirname(__FILE__)));
-                    $actions = [
-                        [
+                    $actions = array();
+                    if (!empty($opts['allow_waybill_invoice_pdf'])) {
+                        $actions[] = array(
                             'label' => 'Download',
                             'title' => 'Download PDF invoice',
                             'target' => '_blank',
@@ -1731,28 +2671,33 @@ function customer_detail_view($customer_id)
                                     ? (isset($row->product_invoice_number) ? trim((string) $row->product_invoice_number) : '')
                                     : (isset($row['product_invoice_number']) ? trim((string) $row['product_invoice_number']) : '');
                                 return !empty($product_invoice_number);
-                            }
-                        ],
-                        [
+                            },
+                        );
+                    }
+                    if (!empty($opts['allow_row_delete'])) {
+                        $actions[] = array(
                             'label' => 'Delete',
                             'title' => 'Delete waybill',
                             'href' => '?page=08600-waybill-manage&delete_waybill={waybill_no}',
                             'class' => 'text-xs font-medium text-red-600 hover:text-red-800 hover:underline',
-                            'onclick' => 'return confirm("Are you sure you want to delete this waybill?")'
-                        ]
-                    ];
+                            'onclick' => 'return confirm("Are you sure you want to delete this waybill?")',
+                        );
+                    }
 
-                    // Use standardized column definitions from KIT_Commons for consistency
-                    $columns = KIT_Commons::getColumns([
+                    $columns = KIT_Commons::getColumns(array(
                         'waybill_no',
-                        'customer_city' => [
+                        'customer_city' => array(
                             'label' => 'City',
+                            'header_class' => 'text-left whitespace-nowrap kit-col-hide-sm',
+                            'cell_class' => 'text-left text-sm whitespace-nowrap kit-col-hide-sm',
                             'callback' => function ($value, $row, $rowIndex) {
                                 return esc_html($value ?: '—');
-                            }
-                        ],
-                        'truck_details' => [
+                            },
+                        ),
+                        'truck_details' => array(
                             'label' => 'Truck Details',
+                            'header_class' => 'text-left whitespace-nowrap kit-col-hide-md',
+                            'cell_class' => 'text-left text-sm kit-col-hide-md',
                             'callback' => function ($value, $row, $rowIndex) {
                                 $row = is_object($row) ? (array) $row : $row;
                                 $truck_number = $row['truck_number'] ?? '';
@@ -1786,10 +2731,12 @@ function customer_detail_view($customer_id)
 
                                 $html .= '</div>';
                                 return $html;
-                            }
-                        ],
-                        'created_at' => [
+                            },
+                        ),
+                        'created_at' => array(
                             'label' => 'Created',
+                            'header_class' => 'text-left whitespace-nowrap kit-col-hide-sm',
+                            'cell_class' => 'text-left text-xs text-gray-600 whitespace-nowrap kit-col-hide-sm',
                             'callback' => function ($value, $row, $rowIndex) {
                                 if (empty($value)) {
                                     return '—';
@@ -1799,65 +2746,46 @@ function customer_detail_view($customer_id)
                                     return esc_html(function_exists('date_i18n') ? date_i18n('M j, Y', $timestamp) : date('M j, Y', $timestamp));
                                 }
                                 return esc_html($value);
-                            }
-                        ]
-                    ]);
+                            },
+                        ),
+                    ));
 
-                    $table_options = [
+                    $table_options = array(
                         'title' => 'Waybills (' . count($waybills) . ')',
-                        'primary_action' => [
-                            'label' => 'View All Waybills',
-                            'href' => '?page=08600-waybill-manage&customer_id=' . $customer_id,
-                            'class' => 'px-4 py-2 bg-gradient-to-r from-blue-600 to-indigo-600 text-white rounded-md hover:from-blue-700 hover:to-indigo-700 transition'
-                        ],
                         'actions' => $actions,
                         'searchable' => true,
                         'sortable' => true,
-                        'bulk_management' => true,
-                        'bulk_actions_list' => ['export', 'delete'],
+                        'bulk_management' => !empty($opts['allow_bulk_actions']),
+                        'bulk_actions_list' => !empty($opts['allow_bulk_actions']) ? array('export', 'delete') : array(),
                         'empty_message' => 'No waybills found for this customer',
-                        'preserve_order' => false
-                    ];
+                        'preserve_order' => false,
+                    );
+                    if (!empty($opts['allow_primary_waybills_link'])) {
+                        $table_options['primary_action'] = array(
+                            'label' => 'View All Waybills',
+                            'href' => '?page=08600-waybill-manage&customer_id=' . $customer_id,
+                            'class' => 'w-full sm:w-auto text-center px-4 py-2 bg-gradient-to-r from-blue-600 to-indigo-600 text-white rounded-md hover:from-blue-700 hover:to-indigo-700 transition whitespace-nowrap',
+                        );
+                    }
 
-                    // Render the unified table with standard styling to match main waybill table
                     echo KIT_Unified_Table::infinite($waybills, $columns, $table_options);
                     ?>
                 </div>
             </div>
         </div>
     </div>
+    <?php if (!empty($opts['allow_bulk_actions'])) : ?>
     <script>
-        function testCustomerToast() {
-            if (window.KITToast) {
-                // Test different toast types
-                window.KITToast.show('Customer data loaded successfully!', 'success', 'Customer Details');
-                setTimeout(() => {
-                    window.KITToast.show('This is a test error message', 'error', 'Test Error');
-                }, 1000);
-                setTimeout(() => {
-                    window.KITToast.show('Customer information updated', 'info', 'Information');
-                }, 2000);
-            } else {
-                alert('Toast system not loaded. Please refresh the page.');
-            }
-        }
-
-        // Initialize bulk management handlers for unified table
         (function() {
             document.addEventListener('DOMContentLoaded', function() {
-                <?php if (!empty($waybills)): ?>
+                <?php if (!empty($waybills)) : ?>
                     const customerId = <?php echo intval($customer_id); ?>;
                     const pluginUrl = '<?php echo esc_js(dirname(dirname(plugin_dir_url(__FILE__)))); ?>';
 
-                    // Find all unified tables on the page and attach export handlers
                     document.querySelectorAll('[id^="kit-infinite-table-"]').forEach(function(table) {
-                        const tableId = table.id;
-                        const containerId = tableId.replace('kit-infinite-table-', 'kit-infinite-wrap-');
                         const container = document.querySelector('[id^="kit-infinite-wrap-"]');
-
                         if (!container) return;
 
-                        // Find the export button within this table's bulk actions bar
                         const exportBtn = container.querySelector('[data-bulk-action="export"]');
                         if (exportBtn) {
                             exportBtn.addEventListener('click', function(e) {
@@ -1872,15 +2800,11 @@ function customer_detail_view($customer_id)
                                     return;
                                 }
 
-                                // Generate concatenated invoice PDF using pdf-customer-bulk.php
                                 const pdfUrl = pluginUrl + '/pdf-customer-bulk.php?selected_ids=' + encodeURIComponent(waybillNos.join(',')) + '&customer_id=' + customerId;
-
-                                // Open PDF in new window/tab
                                 window.open(pdfUrl, '_blank');
                             });
                         }
 
-                        // Find the delete button within this table's bulk actions bar
                         const deleteBtn = container.querySelector('[data-bulk-action="delete"]');
                         if (deleteBtn) {
                             deleteBtn.addEventListener('click', function(e) {
@@ -1899,7 +2823,6 @@ function customer_detail_view($customer_id)
                                     return;
                                 }
 
-                                // Create and submit form
                                 const form = document.createElement('form');
                                 form.method = 'POST';
                                 form.action = window.location.href;
@@ -1925,7 +2848,64 @@ function customer_detail_view($customer_id)
             });
         })();
     </script>
-<?php
+    <?php endif; ?>
+    <?php
+}
+
+function customer_detail_view($customer_id)
+{
+    global $wpdb;
+    $customer_id = intval($customer_id);
+
+    if (isset($_POST['bulk_action']) && isset($_POST['bulk_ids']) && !empty($_POST['bulk_ids'])) {
+        if (!current_user_can('kit_view_waybills')) {
+            wp_die('Unauthorized');
+        }
+
+        $bulk_action = sanitize_text_field($_POST['bulk_action']);
+        $bulk_ids = sanitize_text_field($_POST['bulk_ids']);
+        $waybill_nos = array_map('trim', explode(',', $bulk_ids));
+        $waybill_nos = array_filter($waybill_nos);
+
+        if (!empty($waybill_nos)) {
+            if ($bulk_action === 'delete') {
+                if (isset($_POST['bulk_nonce'])) {
+                    if (!wp_verify_nonce($_POST['bulk_nonce'], 'bulk_waybill_nonce')) {
+                        wp_die('Security check failed');
+                    }
+                }
+
+                if (class_exists('KIT_Waybills')) {
+                    $deleted_count = 0;
+                    foreach ($waybill_nos as $waybill_no) {
+                        if (KIT_Waybills::delete_waybill($waybill_no)) {
+                            $deleted_count++;
+                        }
+                    }
+
+                    if ($deleted_count > 0) {
+                        if (class_exists('KIT_Toast')) {
+                            KIT_Toast::ensure_toast_loads();
+                            echo KIT_Toast::success("Successfully deleted {$deleted_count} waybill(s).", 'Bulk Delete');
+                        }
+                        wp_safe_redirect(admin_url('admin.php?page=08600-customers&view_customer=' . $customer_id . '&bulk_deleted=' . $deleted_count));
+                        exit;
+                    }
+                }
+            } elseif ($bulk_action === 'export') {
+                $plugin_url = dirname(dirname(plugin_dir_url(__FILE__)));
+                $pdf_url = add_query_arg(array(
+                    'selected_ids' => implode(',', $waybill_nos),
+                    'customer_id' => $customer_id,
+                ), $plugin_url . '/pdf-customer-bulk.php');
+
+                wp_redirect($pdf_url);
+                exit;
+            }
+        }
+    }
+
+    kit_customer_detail_view_render($customer_id, kit_customer_detail_view_default_options_staff());
 }
 
 function delete_customer($id, $redirect = false)
@@ -2007,13 +2987,16 @@ function tholaMaCustomer()
         c.city_id,
         country.country_name,
         city.city_name,
-        c.company_name,
+        c.company_id,
+        co.company_name,
         COUNT(w.id) as total_waybills
     FROM $table_name c
     LEFT JOIN {$wpdb->prefix}kit_operating_countries country ON c.country_id = country.id
     LEFT JOIN {$wpdb->prefix}kit_operating_cities city ON c.city_id = city.id
+    LEFT JOIN {$wpdb->prefix}kit_company_customers co ON c.company_id = co.company_id
     LEFT JOIN $waybills_table w ON w.customer_id = c.cust_id
-    GROUP BY c.id, c.cust_id, c.name, c.surname, c.email_address, c.cell, c.address, c.country_id, c.city_id, country.country_name, city.city_name, c.company_name
+        OR (w.customer_id = c.id AND c.id > 0 AND w.customer_id <> c.cust_id)
+    GROUP BY c.id, c.cust_id, c.name, c.surname, c.email_address, c.cell, c.address, c.country_id, c.city_id, country.country_name, city.city_name, c.company_id, co.company_name
 ");
 }
 
@@ -2052,11 +3035,13 @@ function get_customer_details($customer_id)
         c.city_id,
         country.country_name,
         city.city_name,
-        c.company_name
+        c.company_id,
+        co.company_name
         FROM $table_name c
         LEFT JOIN {$wpdb->prefix}kit_operating_countries country ON c.country_id = country.id
         LEFT JOIN {$wpdb->prefix}kit_operating_cities city ON c.city_id = city.id
-        WHERE cust_id = %d",
+        LEFT JOIN {$wpdb->prefix}kit_company_customers co ON c.company_id = co.company_id
+        WHERE c.cust_id = %d",
         $customer_id
     );
 
@@ -2080,6 +3065,8 @@ function edit_customer_form($customer_id)
     global $wpdb;
     $table_name = $wpdb->prefix . 'kit_customers';
     $customer = $wpdb->get_row($wpdb->prepare("SELECT * FROM $table_name WHERE cust_id = %d", $customer_id), ARRAY_A);
+
+    require_once dirname(__FILE__) . '/_customersForm.php';
 
     // Enqueue CSS for the edit customer page
     wp_enqueue_style('autsincss', plugin_dir_url(__FILE__) . '../assets/css/austin.css', array(), '1.0');
@@ -2108,56 +3095,36 @@ function edit_customer_form($customer_id)
     <div class="wrap customers-page kit-edit-customer-page">
         <div class="<?php echo KIT_Commons::containerClasses(); ?>">
             <?php
+            $header_actions = KIT_Commons::renderButton(
+                __('Back', '08600'),
+                'secondary',
+                'md',
+                [
+                    'href' => admin_url('admin.php?page=08600-customers&view_customer=' . $customer_id),
+                    'icon' => '<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M10 19l-7-7m0 0l7-7m-7 7h18" />',
+                    'iconPosition' => 'left',
+                    'noLoading' => true,
+                ]
+            );
             echo KIT_Commons::showingHeader([
-                'title' => 'Edit Customer',
-                'icon' => '<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M16 7a4 4 0 11-8 0 4 4 0 018 0zM12 14a7 7 0 00-7 7h14a7 7 0 00-7-7z" />',
-                'desc'  => KIT_Commons::kitButton([
-                    'color' => 'green',
-                    'href'  => admin_url('admin.php?page=08600-customers&view_customer=' . $customer_id)
-                ], 'Back'),
+                'title'   => __('Edit Individual Customer', '08600'),
+                'desc'    => __('Update this person’s profile, contact, and location. Check “Convert this client into a company” only if you want to move them into the Companies list.', '08600'),
+                'icon'    => '<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M16 7a4 4 0 11-8 0 4 4 0 018 0zM12 14a7 7 0 00-7 7h14a7 7 0 00-7-7z" />',
+                'content' => $header_actions,
             ]);
             ?>
-            <div class="max-w-5xl mx-auto mt-5 mb-6">
-                <div class="bg-white rounded-xl shadow-sm border border-gray-200 overflow-hidden">
-                    <div class="px-4 py-4 md:px-6 md:py-5 border-b border-gray-200 bg-gray-50">
-                        <h1 class="text-xl md:text-2xl font-semibold text-gray-900">Edit Customer</h1>
-                        <p class="text-sm text-gray-500 mt-1">Update profile, contact, and location details.</p>
-                    </div>
-                    <div class="px-4 py-5 md:px-6 md:py-6">
-                        <form method="POST" action="<?php echo admin_url('admin-post.php'); ?>" class="space-y-5">
-                            <?php wp_nonce_field('update_customer_nonce', 'cust_update_nonce'); ?>
-                            <input type="hidden" name="action" value="update_customer" />
-                            <input type="hidden" name="customer_id" value="<?php echo $customer_id; ?>" />
-                            <?php
-                            theForm($customer); ?>
-                            <div class="flex flex-col sm:flex-row justify-end gap-2 pt-5 border-t border-gray-200">
-                                <?php
-                                $back_icon = '<svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M10 19l-7-7m0 0l7-7m-7 7h18" /></svg>';
-                                echo KIT_Commons::renderButton('Back', 'secondary', 'md', [
-                                    'href' => admin_url('admin.php?page=08600-customers&view_customer=' . $customer_id),
-                                    'icon' => $back_icon,
-                                    'classes' => 'w-full sm:w-auto justify-center'
-                                ]);
-                                $save_icon = '<svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 13l4 4L19 7" /></svg>';
-                                echo KIT_Commons::renderButton('Update Customer', 'primary', 'md', [
-                                    'type' => 'submit',
-                                    'name' => 'customer_submit',
-                                    'gradient' => true,
-                                    'icon' => $save_icon,
-                                    'classes' => 'w-full sm:w-auto justify-center'
-                                ]);
-                                ?>
-                            </div>
-                        </form>
-                    </div>
+            <div class="bg-white rounded-xl shadow-sm border border-gray-200 overflow-hidden mt-2 mb-6" style="max-width: 800px;">
+                <div class="px-4 py-5 md:px-6 md:py-6">
+                    <?php echo kit_render_customers_form('edit', $customer); ?>
                 </div>
             </div>
         </div>
-        <?php
-    }
+    </div>
+<?php
+}
 
-    function customer_waybills($customer_id)
-    {
+function customer_waybills($customer_id)
+{
         global $wpdb;
 
         // Sanitize and validate the customer ID

@@ -25,6 +25,9 @@ class KIT_Icon
             case 'edit':
                 $paths = '<path d="M12 20h9"/><path d="M16.5 3.5a2.121 2.121 0 113 3L7 19l-4 1 1-4 12.5-12.5z"/>';
                 break;
+            case 'merge':
+                $paths = '<path d="M8 6v4"/><path d="M16 6v4"/><path d="M8 18v-4"/><path d="M16 18v-4"/><path d="M8 10h8"/><path d="M8 14h8"/><circle cx="8" cy="6" r="2"/><circle cx="16" cy="6" r="2"/><circle cx="8" cy="18" r="2"/><circle cx="16" cy="18" r="2"/>';
+                break;
             case 'plus':
                 $paths = '<path d="M12 5v14"/><path d="M5 12h14"/>';
                 break;

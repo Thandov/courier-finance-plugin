@@ -67,13 +67,18 @@ if (!empty($destination_country_name) && class_exists('KIT_Warehouse')) {
     $available_deliveries = KIT_Warehouse::getAvailableDeliveries($destination_country_name, $destination_city_name);
 }
 
+// System warehouse uses delivery_reference = 'pending' while warehouse=1 — treat as warehouse, not "On Delivery".
+$is_pending_delivery_ref = $current_delivery_ref !== '' && strcasecmp(trim((string) $current_delivery_ref), 'pending') === 0;
+$is_effectively_in_warehouse = ($is_in_warehouse_flag === 1) || $is_pending_delivery_ref;
+$is_on_real_delivery = ($current_delivery_id > 0) && !$is_effectively_in_warehouse;
+
 // Derive a simple status label for the UI
-if ($current_delivery_id > 0) {
+if ($is_on_real_delivery) {
     $location_label = 'On Delivery';
     $location_help  = 'This waybill is currently assigned to a scheduled delivery.';
-} elseif ($is_in_warehouse_flag === 1) {
+} elseif ($is_effectively_in_warehouse) {
     $location_label = 'In Warehouse';
-    $location_help  = 'This waybill is currently stored in the warehouse (no delivery).';
+    $location_help  = 'This waybill is in the warehouse and can be assigned to a scheduled delivery.';
 } else {
     $location_label = 'Unassigned';
     $location_help  = 'This waybill is not assigned to a delivery or warehouse.';
@@ -92,7 +97,7 @@ if ($current_delivery_id > 0) {
             <p class="text-xs text-gray-500 mt-1">
                 <?php echo esc_html($location_help); ?>
             </p>
-            <?php if ($current_delivery_id > 0 && $current_delivery_ref): ?>
+            <?php if ($is_on_real_delivery && $current_delivery_ref): ?>
                 <p class="text-xs text-gray-500 mt-1">
                     Current Delivery:&nbsp;
                     <span class="font-medium text-gray-900">
@@ -103,7 +108,7 @@ if ($current_delivery_id > 0) {
         </div>
     </div>
 
-    <?php if ($is_in_warehouse_flag === 1 || $current_delivery_id === 0): ?>
+    <?php if ($is_effectively_in_warehouse || $current_delivery_id === 0): ?>
         <!-- Show assignment option for warehouse waybills or unassigned waybills -->
         <div class="mt-4">
             <label for="route_delivery_select" class="<?php echo KIT_Commons::labelClass(); ?>">
@@ -166,8 +171,8 @@ if ($current_delivery_id > 0) {
                 </p>
             <?php endif; ?>
         </div>
-    <?php elseif (!empty($available_deliveries)): ?>
-        <!-- Show reassignment option if waybill is already on a delivery -->
+    <?php elseif ($is_on_real_delivery && !empty($available_deliveries)): ?>
+        <!-- Show reassignment option if waybill is already on a real delivery -->
         <div class="mt-4">
             <label for="route_delivery_select" class="<?php echo KIT_Commons::labelClass(); ?>">
                 Reassign to Different Delivery
@@ -203,15 +208,19 @@ if ($current_delivery_id > 0) {
         </div>
     <?php endif; ?>
 
-    <?php if ($current_delivery_id > 0): ?>
+    <?php if ($is_on_real_delivery): ?>
         <div class="mt-3 p-3 border border-amber-200 rounded-md bg-amber-50">
             <label class="flex items-start gap-2 cursor-pointer">
-                <input
-                    type="checkbox"
-                    name="move_to_warehouse"
-                    value="1"
-                    class="mt-0.5 h-4 w-4 text-blue-600 border-gray-300 rounded focus:ring-blue-500"
-                >
+                <?php
+                echo KIT_Commons::Lcheckbox([
+                    'no_label' => true,
+                    'label' => '',
+                    'name' => 'move_to_warehouse',
+                    'omit_id' => true,
+                    'value' => '1',
+                    'class' => 'mt-0.5 h-4 w-4 text-blue-600 border-gray-300 rounded focus:ring-blue-500',
+                ]);
+                ?>
                 <span class="text-xs text-gray-700">
                     <span class="font-semibold">Move this waybill back to Warehouse</span><br>
                     <span class="text-gray-500">

@@ -15,16 +15,16 @@ $is_first = $waybill_index === 0;
 // Set global waybill_index for child components to use
 $GLOBALS['current_waybill_index'] = $waybill_index;
 ?>
-<div class="waybill-misc-section border-2 border-gray-300 rounded-lg p-6 bg-white mb-6" data-waybill-index="<?php echo esc_attr($waybill_index); ?>">
-    <div class="flex items-center justify-between mb-6">
-        <h2 class="text-2xl font-bold text-gray-800">Waybill #<?php echo esc_html($waybill_index + 1); ?> - Miscellaneous Items</h2>
-        <?php if (!$is_first): ?>
-            <?php echo KIT_Commons::renderButton('Remove Waybill', 'danger', 'lg', ['type' => 'button', 'classes' => 'remove-waybill-misc-section bg-red-500 hover:bg-red-600 text-white px-4 py-2 rounded-md text-sm font-medium transition-colors']); ?>
-        <?php endif; ?>
+<div class="waybill-misc-section rounded-lg bg-white mb-2" data-waybill-index="<?php echo esc_attr($waybill_index); ?>">
+    <?php if (!$is_first): ?>
+    <div class="flex items-center justify-between mb-4 px-2 pt-2">
+        <h2 class="text-lg font-semibold text-gray-800">Waybill #<?php echo esc_html($waybill_index + 1); ?> — Misc</h2>
+        <?php echo KIT_Commons::renderButton('Remove Waybill', 'danger', 'lg', ['type' => 'button', 'classes' => 'remove-waybill-misc-section bg-red-500 hover:bg-red-600 text-white px-4 py-2 rounded-md text-sm font-medium transition-colors']); ?>
     </div>
+    <?php endif; ?>
 
     <!-- Miscellaneous Items -->
-    <div class="p-6 rounded-lg bg-slate-100">
+    <div class="p-4 rounded-lg">
         <table class="table w-full">
             <tbody>
                 <tr id="misc-charges-container-<?php echo $waybill_index; ?>">

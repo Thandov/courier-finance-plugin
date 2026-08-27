@@ -1,0 +1,52 @@
+.kit-print-only {
+    display: none;
+}
+
+@media print {
+    .kit-print-only {
+        display: inline;
+        font-weight: 600;
+    }
+
+    .kit-screen-only,
+    .kit-edit-wb-switcher,
+    #wpadminbar,
+    #adminmenumain,
+    #adminmenuback,
+    #adminmenuwrap,
+    #wpfooter,
+    #collapse-button,
+    .notice,
+    [role="alert"],
+    .update-nag,
+    .kit-t2-actions,
+    .kit-t2-tools,
+    .waybill-action-btn-wrap {
+        display: none !important;
+    }
+
+    html.wp-toolbar {
+        padding-top: 0 !important;
+    }
+
+    #wpcontent,
+    #wpbody,
+    #wpbody-content {
+        margin-left: 0 !important;
+        padding-left: 0 !important;
+    }
+
+    .kit-t2-bar,
+    .kit-t2-rail {
+        position: static !important;
+        top: auto !important;
+    }
+
+    .kit-t2-shell {
+        display: block !important;
+    }
+
+    a[href]::after {
+        content: none !important;
+    }
+}

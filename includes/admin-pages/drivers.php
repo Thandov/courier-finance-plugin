@@ -68,7 +68,7 @@ function kit_render_driver_multiform($atts = [])
                     'id'    => 'name',
                     'type'  => 'text',
                     'value' => $driver && isset($driver->name) ? esc_attr($driver->name) : '',
-                    'class' => 'w-full rounded-lg border border-gray-300 focus:border-blue-500 focus:ring-2 focus:ring-blue-200 px-4 py-2 text-gray-800 bg-white transition',
+                    'preset' => 'form_md',
                     'required' => true
                 ]);
                 
@@ -78,7 +78,7 @@ function kit_render_driver_multiform($atts = [])
                     'id'    => 'phone',
                     'type'  => 'tel',
                     'value' => $driver && isset($driver->phone) ? esc_attr($driver->phone) : '',
-                    'class' => 'w-full rounded-lg border border-gray-300 focus:border-blue-500 focus:ring-2 focus:ring-blue-200 px-4 py-2 text-gray-800 bg-white transition',
+                    'preset' => 'form_md',
                 ]);
                 
                 echo KIT_Commons::Linput([
@@ -87,7 +87,7 @@ function kit_render_driver_multiform($atts = [])
                     'id'    => 'email',
                     'type'  => 'email',
                     'value' => $driver && isset($driver->email) ? esc_attr($driver->email) : '',
-                    'class' => 'w-full rounded-lg border border-gray-300 focus:border-blue-500 focus:ring-2 focus:ring-blue-200 px-4 py-2 text-gray-800 bg-white transition',
+                    'preset' => 'form_md',
                 ]);
                 
                 echo KIT_Commons::Linput([
@@ -96,7 +96,7 @@ function kit_render_driver_multiform($atts = [])
                     'id'    => 'license_number',
                     'type'  => 'text',
                     'value' => $driver && isset($driver->license_number) ? esc_attr($driver->license_number) : '',
-                    'class' => 'w-full rounded-lg border border-gray-300 focus:border-blue-500 focus:ring-2 focus:ring-blue-200 px-4 py-2 text-gray-800 bg-white transition',
+                    'preset' => 'form_md',
                 ]);
                 ?>
             </div>
@@ -104,14 +104,21 @@ function kit_render_driver_multiform($atts = [])
             <div class="mt-5 pt-4 border-t border-gray-200">
                 <label class="block <?= KIT_Commons::labelClass() ?> mb-2">Status</label>
                 <label for="is_active" class="kit-driver-status-toggle">
-                    <input type="checkbox" id="is_active" name="is_active" value="1" class="kit-driver-status-input"
-                           <?php
-                           if ($edit_mode && $driver && isset($driver->is_active)) {
-                               echo $driver->is_active ? 'checked' : '';
-                           } else {
-                               echo 'checked';
-                           }
-                           ?>>
+                    <?php
+                    $driver_active_checked = true;
+                    if ($edit_mode && $driver && isset($driver->is_active)) {
+                        $driver_active_checked = (bool) $driver->is_active;
+                    }
+                    echo KIT_Commons::Lcheckbox([
+                        'no_label' => true,
+                        'label' => '',
+                        'id' => 'is_active',
+                        'name' => 'is_active',
+                        'value' => '1',
+                        'checked' => $driver_active_checked,
+                        'class' => 'kit-driver-status-input',
+                    ]);
+                    ?>
                     <span class="kit-driver-status-switch" aria-hidden="true">
                         <span class="kit-driver-status-knob"></span>
                     </span>
@@ -127,7 +134,7 @@ function kit_render_driver_multiform($atts = [])
                 echo KIT_Commons::renderButton(
                     $edit_mode ? 'Update Driver' : 'Add Driver',
                     'primary',
-                    'md',
+                    'lg',
                     ['type' => 'submit']
                 );
                 ?>
@@ -367,6 +374,19 @@ if (isset($_POST['bulk_action']) && isset($_POST['bulk_ids']) && wp_verify_nonce
                 wp_redirect(add_query_arg($redirect_args, admin_url('admin.php')));
             }
             exit;
+
+        case 'packing_list':
+            $redirect_args = [
+                'page'    => 'manage-drivers',
+                'message' => urlencode('Packing list applies to waybills only.'),
+                'success' => '0',
+            ];
+            if (isset($build_redirect_url) && is_callable($build_redirect_url)) {
+                wp_redirect($build_redirect_url($redirect_args));
+            } else {
+                wp_redirect(add_query_arg($redirect_args, admin_url('admin.php')));
+            }
+            exit;
     }
 
     if ($action !== 'export') {
@@ -428,41 +448,8 @@ if (isset($_GET['message'])) {
     ]);
     ?>
             <?php
-        $drivers_stats = [
-            [
-                'title' => 'Total Drivers',
-                'value' => number_format($total_drivers),
-                'icon' => 'M20 7l-8-4-8 4m16 0l-8 4m8-4v10l-8 4m0-10L4 7m8 4v10M4 7v10l8 4',
-                'color' => 'blue',
-                'class' => 'drivers-stats-total'
-            ],
-            [
-                'title' => 'Active Drivers',
-                'value' => number_format($active_drivers),
-                'icon' => 'M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z',
-                'color' => 'green',
-                'class' => 'drivers-stats-active'
-            ],
-            [
-                'title' => 'Inactive Drivers',
-                'value' => number_format($inactive_drivers),
-                'icon' => 'M13 10V3L4 14h7v7l9-11h-7z',
-                'color' => 'yellow',
-                'class' => 'drivers-stats-inactive'
-            ],
-            [
-                'title' => 'Drivers Served',
-                'value' => number_format($total_countries),
-                'icon' => 'M3.055 11H5a2 2 0 012 2v1a2 2 0 002 2 2 2 0 012 2v2.945M8 3.935V5.5A2.5 2.5 0 0010.5 8h.5a2 2 0 012 2 2 2 0 104 0 2 2 0 012-2h1.064M15 20.488V18a2 2 0 012-2h3.064M21 12a9 9 0 11-18 0 9 9 0 0118 0z',
-                'color' => 'purple',
-                'class' => 'countries-stats-served'
-            ]
-        ];
-
-        // Render stats
-        echo KIT_QuickStats::render($drivers_stats, '', [
-            'grid_cols' => 'grid-cols-1 sm:grid-cols-4 md:grid-cols-4 lg:grid-cols-4',
-            'gap' => 'gap-4'
+        echo KIT_QuickStats::render_for_context(KIT_QuickStats::CONTEXT_DRIVERS, [
+            'drivers' => $drivers,
         ]);
         ?>
     
@@ -567,6 +554,9 @@ if (isset($_GET['message'])) {
                     'email' => $driver_row->email ?: 'N/A', // Keep for search
                     'license_number' => $driver_row->license_number ?: 'N/A',
                     'is_active' => $driver_row->is_active,
+                    'city' => 'Drivers',
+                    'status' => !empty($driver_row->is_active) ? 'active' : 'inactive',
+                    'created_at' => $driver_row->created_at ?? '',
                 ];
             }
 
@@ -620,16 +610,13 @@ if (isset($_GET['message'])) {
             ];
 
             // Render unified table
-            echo KIT_Unified_Table::infinite($drivers_data, $columns, [
+            echo KIT_Unified_Table::infinite($drivers_data, $columns, KIT_Unified_Table::optionsWithManageDefaults([
                 'title' => 'All Drivers',
                 'sync_entity' => 'drivers',
                 'actions' => $actions,
-                'searchable' => true,
-                'sortable' => true,
                 'pagination' => true,
                 'items_per_page' => 20,
-                'bulk_management' => true,
-                'bulk_actions_list' => ['delete', 'export', 'status_active', 'status_inactive'],
+                'bulk_actions_list' => ['delete', 'export', 'packing_list', 'status_active', 'status_inactive'],
                 'empty_message' => 'No drivers found. <a href="' . admin_url('admin.php?page=manage-drivers&add=1') . '">Add your first driver</a>.',
                 'search_placeholder' => 'Search drivers...',
                 'search_filters' => [
@@ -638,7 +625,7 @@ if (isset($_GET['message'])) {
                     ['value' => 'license_number', 'label' => 'License Number', 'placeholder' => 'Search by license number...']
                 ],
                 'search_default_filter' => 'name',
-            ]);
+            ]));
             ?>
         </div>
     <?php endif; ?>

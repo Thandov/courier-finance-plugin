@@ -15,28 +15,67 @@ function initItemsPerPage() {
     }
 }
 
+/**
+ * True when element is displayed (not display:none / visibility:hidden).
+ */
+function kitFinanceModalVisible(el) {
+    if (!el) return false;
+    var s = window.getComputedStyle(el);
+    if (s.display === 'none' || s.visibility === 'hidden') return false;
+    return !!(el.offsetWidth || el.offsetHeight || el.getClientRects().length);
+}
+
+/**
+ * Prefer city <select> inside a visible modal (#create-waybill-modal, #edit-delivery-modal,
+ * #add-delivery-truck-modal) so duplicate delivery-form IDs on kit-deliveries do not target the wrong select.
+ */
+function resolveCitySelectForField(isOrigin) {
+    var primaryId = isOrigin ? 'origin_city_select' : 'destination_city_select';
+    var fallbackId = isOrigin ? 'origin_city' : 'destination_city';
+
+    function pickIn(container) {
+        if (!container) return null;
+        if (isOrigin) {
+            return container.querySelector('#' + primaryId) || container.querySelector('#' + fallbackId);
+        }
+        return container.querySelector('#' + fallbackId) || container.querySelector('#' + primaryId);
+    }
+
+    var roots = [
+        document.getElementById('create-waybill-modal'),
+        document.getElementById('edit-delivery-modal'),
+        document.getElementById('add-delivery-truck-modal'),
+        document.getElementById('create-delivery-modal'),
+        document.getElementById('add-delivery-modal')
+    ];
+    for (var i = 0; i < roots.length; i++) {
+        if (!roots[i] || !kitFinanceModalVisible(roots[i])) continue;
+        var found = pickIn(roots[i]);
+        if (found) return found;
+    }
+
+    if (!isOrigin) {
+        return document.getElementById(fallbackId) || document.getElementById(primaryId);
+    }
+    return document.getElementById(primaryId) || document.getElementById(fallbackId);
+}
+
 // Country change handler
 // Global function for handling country changes (using working implementation from waybill)
 function handleCountryChange(countryId, fieldName) {
     if (!countryId) return;
 
-    var primaryId = '';
-    var fallbackId = '';
     var isOrigin = false;
 
     if (fieldName === 'origin' || fieldName === 'origin_country') {
-        primaryId = 'origin_city_select';
-        fallbackId = 'origin_city';
         isOrigin = true;
     } else if (fieldName === 'destination' || fieldName === 'destination_country') {
-        primaryId = 'destination_city_select';
-        fallbackId = 'destination_city';
         isOrigin = false;
     } else {
         return;
     }
 
-    var citySelect = document.getElementById(primaryId) || document.getElementById(fallbackId);
+    var citySelect = resolveCitySelectForField(isOrigin);
     if (!citySelect) return;
 
     // Try preloaded map first for instant update

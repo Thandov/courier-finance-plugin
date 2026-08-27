@@ -209,6 +209,11 @@ function kit_employee_admin_redirect() {
     if ($is_post && strpos($uri, 'admin-post.php') !== false) {
         return;
     }
+    // Warehouse assign posts to admin.php; handled on admin_init before this redirect runs.
+    if ($is_post && strpos($uri, 'admin.php') !== false && isset($_REQUEST['page'], $_POST['assign_warehouse_items'])
+        && sanitize_text_field(wp_unslash($_REQUEST['page'])) === 'warehouse-waybills') {
+        return;
+    }
 
     $dashboard_url = apply_filters('kit_employee_dashboard_url', home_url('/employee-dashboard/'));
     wp_safe_redirect($dashboard_url);
@@ -240,11 +245,13 @@ function kit_employee_portal_section_callbacks() {
         '08600-waybill-manage'     => 'plugin_Waybill_list_page',
         'warehouse-waybills'       => 'warehouse_waybills_page',
         '08600-customers'          => array('KIT_Customers', 'customer_dashboard_page'),
+        '08600-booking-requests'   => 'kit_booking_requests_admin_page',
         '08600-add-customer'       => 'add_customer_page',
         'edit-customer'            => 'edit_customer_page',
         'route-management'         => array('KIT_Routes', 'plugin_route_management_page'),
         'route-create'             => array('KIT_Routes', 'route_create_page'),
         '08600-countries'          => 'countries_management_page',
+        '08600-trip-create'        => array('KIT_Deliveries', 'render_create_trip_page'),
         'kit-deliveries'           => array('KIT_Deliveries', 'render_admin_page'),
         'manage-drivers'           => 'drivers_management_page',
         '08600-Waybill-view'       => array('KIT_Waybills', 'waybillView'),
@@ -542,7 +549,7 @@ function kit_employee_portal_enqueue_section_assets($section) {
     wp_enqueue_script('jquery');
 
     // Sections that need waybill scripts (kitscript, waybill-pagination, components) and myPluginAjax
-    $waybill_sections = array('08600-waybill-create', '08600-waybill-manage', '08600-Waybill-view', 'warehouse-waybills');
+    $waybill_sections = array('08600-waybill-create', '08600-waybill-manage', '08600-Waybill-view', 'warehouse-waybills', '08600-trip-create', 'kit-deliveries');
     if (in_array($section, $waybill_sections, true)) {
         wp_enqueue_script('kitscript', $plugin_url . 'js/kitscript.js', array('jquery'), '1.0.0', false);
         wp_enqueue_script('waybill-pagination', $plugin_url . 'js/waybill-pagination.js', array('jquery'), '1.0.0', false);
@@ -576,7 +583,7 @@ function kit_employee_portal_enqueue_section_assets($section) {
         wp_add_inline_script('jquery', 'window.ajaxurl = "' . esc_url($ajax_url) . '";', 'before');
     }
     // Deliveries and other sections need ajaxurl for Edit Delivery modal and other AJAX
-    $ajax_sections = array('kit-deliveries', '08600-waybill-create', '08600-waybill-manage', '08600-Waybill-view', 'warehouse-waybills');
+    $ajax_sections = array('kit-deliveries', '08600-trip-create', '08600-waybill-create', '08600-waybill-manage', '08600-Waybill-view', 'warehouse-waybills');
     if (in_array($section, $ajax_sections, true)) {
         $ajax_url = admin_url('admin-ajax.php');
         wp_add_inline_script('jquery', 'window.ajaxurl = "' . esc_url($ajax_url) . '";', 'before');
@@ -601,16 +608,9 @@ function kit_employee_enqueue_dashboard_assets() {
     wp_enqueue_script('leaflet-js', 'https://unpkg.com/leaflet@1.9.4/dist/leaflet.js', array(), '1.9.4', true);
     wp_enqueue_script('kit-dashboard-map', $plugin_url . 'assets/js/dashboard-map.js', array('jquery', 'leaflet-js'), '1.0', true);
 
-    global $wpdb;
-    $default_map_address = 'Unit 1, Kya North Park, 28 Bernie St, Kya Sands, Randburg, 2188';
-    $map_center_address = '';
-    if ($wpdb && isset($wpdb->prefix)) {
-        $table = $wpdb->prefix . 'kit_company_details';
-        if ($wpdb->get_var("SHOW TABLES LIKE '" . esc_sql($table) . "'") === $table) {
-            $map_center_address = (string) $wpdb->get_var('SELECT company_address FROM ' . $wpdb->prefix . 'kit_company_details LIMIT 1');
-        }
-    }
-    $map_center_address = trim($map_center_address) !== '' ? trim($map_center_address) : $default_map_address;
+    $map_center_address = class_exists('KIT_Company')
+        ? (string) (KIT_Company::get_details_array()['company_address'] ?? KIT_Company::COMPANY_ADDRESS)
+        : 'Unit 1, Kya North Park, 28 Bernie St, Kya Sands, Randburg, 2188';
 
     wp_localize_script('kit-dashboard-map', 'kitDashboardMap', array(
         'ajaxurl'              => admin_url('admin-ajax.php'),

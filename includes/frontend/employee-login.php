@@ -94,7 +94,17 @@ function kit_employee_login_shortcode() {
 
                 <p>
                     <label for="kit_user_login"><?php esc_html_e('Username', '08600-services-quotations'); ?></label>
-                    <input type="text" name="log" id="kit_user_login" class="input" size="20" autocomplete="username" required>
+                    <?php echo KIT_Commons::Linput([
+                        'no_label' => true,
+                        'label' => '',
+                        'name' => 'log',
+                        'id' => 'kit_user_login',
+                        'type' => 'text',
+                        'value' => '',
+                        'preset' => '',
+                        'class' => 'input',
+                        'special' => 'size="20" autocomplete="username" required',
+                    ]); ?>
                 </p>
 
                 <p>
@@ -104,7 +114,16 @@ function kit_employee_login_shortcode() {
 
                 <p class="kit-employee-remember">
                     <label>
-                        <input name="rememberme" type="checkbox" value="forever">
+                        <?php
+                        echo KIT_Commons::Lcheckbox([
+                            'no_label' => true,
+                            'label' => '',
+                            'name' => 'rememberme',
+                            'omit_id' => true,
+                            'value' => 'forever',
+                            'class' => 'input',
+                        ]);
+                        ?>
                         <?php esc_html_e('Remember Me', '08600-services-quotations'); ?>
                     </label>
                 </p>

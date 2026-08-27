@@ -14,6 +14,358 @@ if (!defined('ABSPATH')) {
 class KIT_Unified_Table
 {
     /**
+     * Default <tr> attributes for the Waybill Manage dashboard (KPI filters, etc.).
+     *
+     * @param array|object $row
+     * @return array<string, string>
+     */
+    public static function defaultManageRowAttrs($row, $rowIndex)
+    {
+        $r = is_array($row) ? $row : (array) $row;
+        if (!empty($r['__group_row'])) {
+            return [];
+        }
+        $attrs = [];
+        $wh = !empty($r['is_warehoused'])
+            || (isset($r['warehouse']) && (int) $r['warehouse'] === 1);
+        $attrs['data-warehouse'] = $wh ? '1' : '0';
+        $st = isset($r['status']) ? strtolower((string) $r['status']) : '';
+        $attrs['data-status'] = $st;
+        if (!empty($r['created_at'])) {
+            $attrs['data-created-at'] = (string) $r['created_at'];
+        }
+        return $attrs;
+    }
+
+    /**
+     * Same option bundle as admin Waybill Manage (08600-waybill-manage). Merge per-page keys
+     * (title, actions, sync_entity, empty_message, search_filters, etc.).
+     *
+     * @param array<string, mixed> $overrides
+     * @return array<string, mixed>
+     */
+    public static function optionsWithManageDefaults(array $overrides = [])
+    {
+        $base = [
+            'table_class' => 'w-full table-auto border-collapse kit-waybill-dashboard-table',
+            'searchable' => true,
+            'sortable' => true,
+            'exportable' => true,
+            'bulk_management' => true,
+            'bulk_actions_list' => ['delete', 'export', 'packing_list', 'move_to_warehouse'],
+            'delivery_list_print' => true,
+            'groupby' => 'city',
+            'group_heading_prefix' => '',
+            'preserve_order' => true,
+            'group_collapsible' => true,
+            'group_collapsed' => false,
+            'table_type' => true,
+            'row_attrs_callback' => [__CLASS__, 'defaultManageRowAttrs'],
+        ];
+        return array_merge($base, $overrides);
+    }
+
+    /**
+     * Labels for unified-table bulk action select options.
+     *
+     * @return array<string, string>
+     */
+    public static function bulkActionLabels(): array
+    {
+        return [
+            'delete' => __('Delete', '08600-services-quotations'),
+            'export' => __('Export to PDF', '08600-services-quotations'),
+            'packing_list' => __('Packing list', '08600-services-quotations'),
+            'move_to_warehouse' => __('Move to Warehouse', '08600-services-quotations'),
+            'status_active' => __('Set Active', '08600-services-quotations'),
+            'status_inactive' => __('Set Inactive', '08600-services-quotations'),
+        ];
+    }
+
+    /**
+     * Sort rows by waybill number descending (numeric prefix, then string, then id).
+     *
+     * @param array|object $a
+     * @param array|object $b
+     */
+    public static function sortRowsByWaybillNoDesc($a, $b): int
+    {
+        $aVal = is_object($a) ? get_object_vars($a) : (array) $a;
+        $bVal = is_object($b) ? get_object_vars($b) : (array) $b;
+        $aNo = (string) ($aVal['waybill_no'] ?? '');
+        $bNo = (string) ($bVal['waybill_no'] ?? '');
+        // Cast, never add: rows without a waybill number (deliveries, drivers)
+        // pass an empty string here, and "" + 0 is a TypeError on PHP 8.
+        $aNum = (float) $aNo;
+        $bNum = (float) $bNo;
+        if ($aNum !== $bNum) {
+            return $bNum <=> $aNum;
+        }
+        $strCmp = strcmp($bNo, $aNo);
+        if ($strCmp !== 0) {
+            return $strCmp;
+        }
+        $aId = (int) ($aVal['waybill_id'] ?? $aVal['id'] ?? 0);
+        $bId = (int) ($bVal['waybill_id'] ?? $bVal['id'] ?? 0);
+        return $bId <=> $aId;
+    }
+
+    /**
+     * WP admin uses appearance:none + a Dashicons ::before glyph.
+     * Tailwind size/border/bg-white on these inputs clips that glyph, so
+     * checked boxes look empty while the bulk bar still says "N selected".
+     * Emit with the table so pages that do not load dashboard.css still work.
+     */
+    public static function bulk_checkbox_css(): string
+    {
+        return <<<'CSS'
+input.bulk-row-checkbox[type="checkbox"],
+input.bulk-select-all-checkbox[type="checkbox"] {
+    -webkit-appearance: none !important;
+    appearance: none !important;
+    width: 1.125rem !important;
+    height: 1.125rem !important;
+    min-width: 1.125rem !important;
+    margin: 0 !important;
+    padding: 0 !important;
+    display: inline-block !important;
+    position: relative !important;
+    vertical-align: middle;
+    background: #fff !important;
+    border: 2px solid #111 !important;
+    border-radius: 4px !important;
+    box-shadow: none !important;
+    line-height: 0 !important;
+    cursor: pointer;
+    overflow: visible !important;
+    opacity: 1 !important;
+    visibility: visible !important;
+    color: transparent !important;
+}
+input.bulk-row-checkbox[type="checkbox"]:checked,
+input.bulk-select-all-checkbox[type="checkbox"]:checked {
+    background: #1d4ed8 !important;
+    border-color: #1d4ed8 !important;
+}
+input.bulk-row-checkbox[type="checkbox"]:checked::before,
+input.bulk-row-checkbox[type="checkbox"]:checked:before,
+input.bulk-select-all-checkbox[type="checkbox"]:checked::before,
+input.bulk-select-all-checkbox[type="checkbox"]:checked:before {
+    content: "" !important;
+    display: block !important;
+    position: absolute !important;
+    left: 0.28rem;
+    top: 0.05rem;
+    width: 0.28rem !important;
+    height: 0.5rem !important;
+    margin: 0 !important;
+    padding: 0 !important;
+    float: none !important;
+    border: solid #fff !important;
+    border-width: 0 2px 2px 0 !important;
+    transform: rotate(45deg);
+    font-family: inherit !important;
+    font-size: 0 !important;
+    line-height: 0 !important;
+    color: transparent !important;
+    background: none !important;
+    box-shadow: none !important;
+    speak: never;
+}
+input.bulk-row-checkbox[type="checkbox"]:focus,
+input.bulk-select-all-checkbox[type="checkbox"]:focus {
+    outline: 2px solid #93c5fd;
+    outline-offset: 2px;
+    box-shadow: none !important;
+}
+th.kit-bulk-select-all-cell {
+    overflow: visible !important;
+    position: relative;
+    z-index: 2;
+    text-align: center;
+    vertical-align: middle;
+}
+.kit-waybill-dashboard-table tr.kit-row-selected td,
+table tr.kit-row-selected td {
+    background-color: #eff6ff;
+}
+.kit-waybill-dashboard-table td.bulk-checkbox-cell,
+.kit-waybill-dashboard-table td.kit-checkbox-only-cell,
+td.bulk-checkbox-cell,
+td.kit-checkbox-only-cell {
+    overflow: visible;
+}
+CSS;
+    }
+
+    /**
+     * Single-row table toolbar: view, search, and selection actions.
+     */
+    public static function toolbar_css(): string
+    {
+        return <<<'CSS'
+.kit-table-toolbar {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 8px 10px;
+    padding: 10px 16px;
+    border-top: 1px solid #e5e7eb;
+    background: #fafafa;
+}
+.kit-table-seg {
+    display: inline-flex;
+    flex-shrink: 0;
+    border: 1px solid #d1d5db;
+    background: #fff;
+}
+.kit-table-seg__btn {
+    height: 36px;
+    padding: 0 12px;
+    margin: 0;
+    border: 0;
+    border-right: 1px solid #d1d5db;
+    background: #fff;
+    color: #111;
+    font-size: 13px;
+    font-weight: 600;
+    line-height: 36px;
+    cursor: pointer;
+}
+.kit-table-seg__btn:last-child { border-right: 0; }
+.kit-table-seg__btn.is-active {
+    background: #1d4ed8;
+    color: #fff;
+}
+.kit-table-seg__btn:focus-visible {
+    outline: 2px solid #93c5fd;
+    outline-offset: -2px;
+}
+.kit-table-toolbar__find {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    flex: 1 1 14rem;
+    min-width: 14rem;
+}
+.kit-table-toolbar.is-selecting .kit-table-toolbar__find {
+    display: none;
+}
+.kit-table-toolbar__search {
+    flex: 1 1 auto;
+    min-width: 10rem;
+}
+.kit-table-toolbar__search-input,
+.kit-table-toolbar__search input[type="text"] {
+    width: 100% !important;
+    height: 36px !important;
+    min-height: 36px !important;
+    padding: 0 10px 0 32px !important;
+    font-size: 13px !important;
+    line-height: 36px !important;
+    border: 1px solid #d1d5db !important;
+    border-radius: 4px !important;
+    background: #fff !important;
+    box-sizing: border-box;
+}
+.kit-table-toolbar__filter,
+.kit-table-toolbar__select {
+    height: 36px !important;
+    min-height: 36px !important;
+    max-height: 36px !important;
+    padding: 0 28px 0 10px !important;
+    margin: 0 !important;
+    font-size: 13px !important;
+    line-height: 34px !important;
+    border: 1px solid #d1d5db !important;
+    border-radius: 4px !important;
+    background: #fff !important;
+    color: #111 !important;
+    -webkit-appearance: none;
+    appearance: none;
+    background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 20 20' fill='none' stroke='%236b7280' stroke-width='2'%3E%3Cpath d='M6 8l4 4 4-4'/%3E%3C/svg%3E");
+    background-repeat: no-repeat;
+    background-position: right 8px center;
+    cursor: pointer;
+}
+.kit-table-toolbar__select {
+    flex: 0 1 13rem;
+    min-width: 11rem;
+    max-width: 16rem;
+}
+.kit-table-toolbar__filter {
+    flex: 0 0 8.5rem;
+    width: 8.5rem;
+}
+.kit-table-toolbar__bulk {
+    display: none;
+    align-items: center;
+    gap: 8px;
+    flex: 1 1 auto;
+    min-width: 0;
+}
+.kit-table-toolbar.is-selecting .kit-table-toolbar__bulk {
+    display: flex;
+    flex-wrap: wrap;
+}
+.kit-table-toolbar__count {
+    font-size: 13px;
+    font-weight: 650;
+    color: #111;
+    white-space: nowrap;
+}
+.kit-table-toolbar__ok,
+.kit-table-toolbar__ok.button,
+button.kit-table-toolbar__ok {
+    height: 36px !important;
+    min-height: 36px !important;
+    padding: 0 14px !important;
+    min-width: 3.25rem !important;
+    font-size: 13px !important;
+    font-weight: 650 !important;
+    line-height: 1 !important;
+    background: #1d4ed8 !important;
+    color: #fff !important;
+    border: 1px solid #1d4ed8 !important;
+    border-radius: 4px !important;
+    cursor: pointer;
+}
+.kit-table-toolbar__ok:disabled {
+    opacity: 0.45;
+    cursor: not-allowed;
+}
+.kit-table-toolbar__clear,
+.kit-table-toolbar__print,
+.kit-table-toolbar__icon-btn {
+    height: 36px !important;
+    min-height: 36px !important;
+    padding: 0 10px !important;
+    font-size: 13px !important;
+    line-height: 1 !important;
+    white-space: nowrap;
+}
+.kit-table-toolbar__print { flex-shrink: 0; }
+@media (max-width: 640px) {
+    .kit-table-toolbar__find { min-width: 100%; flex-basis: 100%; }
+    .kit-table-toolbar__select { min-width: 9rem; }
+}
+CSS;
+    }
+
+    /**
+     * Print table chrome CSS once per request (body-safe; works after admin head).
+     */
+    public static function ensure_bulk_checkbox_styles(): void
+    {
+        static $printed = false;
+        if ($printed) {
+            return;
+        }
+        $printed = true;
+        echo '<style id="kit-unified-table-chrome">' . self::bulk_checkbox_css() . self::toolbar_css() . '</style>';
+    }
+
+    /**
      * Render a table with infinite scroll enabled.
      * Simple implementation that shows all data.
      */
@@ -29,7 +381,7 @@ class KIT_Unified_Table
             'bulk_actions' => false,
             'selectable' => false,
             'bulk_management' => false,
-            'bulk_actions_list' => [], // ['delete', 'export', 'packing_list', 'status_active', 'status_inactive']
+            'bulk_actions_list' => [], // ['delete', 'export', 'packing_list', 'move_to_warehouse', 'status_active', 'status_inactive']
             'delivery_list_print' => false, // Waybills: toolbar "Print delivery list" (visible rows only)
             'bulk_action_handler' => null, // Callback function to handle bulk actions
             'empty_message' => 'No data found',
@@ -61,9 +413,14 @@ class KIT_Unified_Table
             'search_filters' => [], // Custom search filter options: [['value' => 'field', 'label' => 'Label'], ...]
             'search_default_filter' => null, // Default filter value
             'sync_entity' => null, // If set (drivers|customers|deliveries|waybills), show sync dropdown
+            'max_height' => '', // e.g. '60vh' or '500px' — fixed-height scrollable table body
         ];
 
         $options = array_merge($defaults, $options);
+        $table_max_height = is_string($options['max_height'] ?? '') ? trim((string) $options['max_height']) : '';
+        $table_scroll_style = $table_max_height !== ''
+            ? 'max-height:' . esc_attr($table_max_height) . ';overflow-y:auto;'
+            : '';
 
         $bulk_actions_for_print = $options['bulk_actions_list'] ?? [];
         $needs_waybill_list_print_globals = (
@@ -82,56 +439,63 @@ class KIT_Unified_Table
             $options['bulk_management'] = false;
         }
 
+        self::ensure_bulk_checkbox_styles();
+
         // Show ALL data initially - no pagination for infinite scroll
         $total_items = count($data);
         $display_data = $data; // Show all items
 
-        // Ensure newest entries (by created_at or ID) appear first unless caller preserves order
+        // Default sort unless caller preserves order: waybill tables by waybill_no DESC; else created_at / id
         if (!empty($display_data) && !$options['preserve_order']) {
             $sample = reset($display_data);
             $sampleArray = is_object($sample) ? get_object_vars($sample) : (array) $sample;
 
-            $sortKey = null;
-            if (array_key_exists('created_at', $sampleArray)) {
-                $sortKey = 'created_at';
-            } elseif (array_key_exists('updated_at', $sampleArray)) {
-                $sortKey = 'updated_at';
-            } elseif (array_key_exists('waybill_id', $sampleArray)) {
-                $sortKey = 'waybill_id';
-            } elseif (array_key_exists('id', $sampleArray)) {
-                $sortKey = 'id';
-            }
+            if (array_key_exists('waybill_no', $sampleArray)) {
+                usort($display_data, [__CLASS__, 'sortRowsByWaybillNoDesc']);
+            } else {
+                $sortKey = null;
+                if (array_key_exists('created_at', $sampleArray)) {
+                    $sortKey = 'created_at';
+                } elseif (array_key_exists('updated_at', $sampleArray)) {
+                    $sortKey = 'updated_at';
+                } elseif (array_key_exists('waybill_id', $sampleArray)) {
+                    $sortKey = 'waybill_id';
+                } elseif (array_key_exists('id', $sampleArray)) {
+                    $sortKey = 'id';
+                }
 
-            if ($sortKey) {
-                usort($display_data, function ($a, $b) use ($sortKey) {
-                    $aVal = is_object($a) ? get_object_vars($a) : (array) $a;
-                    $bVal = is_object($b) ? get_object_vars($b) : (array) $b;
+                if ($sortKey) {
+                    usort($display_data, function ($a, $b) use ($sortKey) {
+                        $aVal = is_object($a) ? get_object_vars($a) : (array) $a;
+                        $bVal = is_object($b) ? get_object_vars($b) : (array) $b;
 
-                    $aValue = $aVal[$sortKey] ?? null;
-                    $bValue = $bVal[$sortKey] ?? null;
+                        $aValue = $aVal[$sortKey] ?? null;
+                        $bValue = $bVal[$sortKey] ?? null;
 
-                    if ($aValue === $bValue) {
-                        return 0;
-                    }
+                        if ($aValue === $bValue) {
+                            return 0;
+                        }
 
-                    // Attempt to compare as timestamps/numbers first
-                    $aNumeric = is_numeric($aValue) ? (float) $aValue : strtotime((string) $aValue);
-                    $bNumeric = is_numeric($bValue) ? (float) $bValue : strtotime((string) $bValue);
+                        // Attempt to compare as timestamps/numbers first
+                        $aNumeric = is_numeric($aValue) ? (float) $aValue : strtotime((string) $aValue);
+                        $bNumeric = is_numeric($bValue) ? (float) $bValue : strtotime((string) $bValue);
 
-                    if ($aNumeric !== false && $bNumeric !== false) {
-                        return $bNumeric <=> $aNumeric; // Descending
-                    }
+                        if ($aNumeric !== false && $bNumeric !== false) {
+                            return $bNumeric <=> $aNumeric; // Descending
+                        }
 
-                    return strcasecmp((string) $bValue, (string) $aValue);
-                });
+                        return strcasecmp((string) $bValue, (string) $aValue);
+                    });
+                }
             }
         }
 
-        // Check URL parameter for view preference
+        // View toggle (table_type): default is ungrouped ("All Waybills"). City grouping only when ?view=grouped.
         $view_param = isset($_GET['view']) ? sanitize_text_field($_GET['view']) : null;
-        if ($options['table_type'] === true && $view_param === 'infinite') {
-            // Override groupby when infinite view is requested
-            $options['groupby'] = null;
+        if ($options['table_type'] === true) {
+            if ($view_param !== 'grouped' || empty($original_groupby)) {
+                $options['groupby'] = null;
+            }
         }
 
         $groupField = !empty($options['groupby']) ? $options['groupby'] : null;
@@ -201,29 +565,8 @@ class KIT_Unified_Table
                     return $groupCompare;
                 }
 
-                // Sort by customer_name
-
-                // If both same type, sort by customer_name
-                $aCustomerName = $aArray['customer_name'] ?? '';
-                $bCustomerName = $bArray['customer_name'] ?? '';
-
-                if (is_scalar($aCustomerName)) {
-                    $aCustomerLabel = (string) $aCustomerName;
-                } elseif (is_object($aCustomerName) && method_exists($aCustomerName, '__toString')) {
-                    $aCustomerLabel = (string) $aCustomerName;
-                } else {
-                    $aCustomerLabel = '';
-                }
-
-                if (is_scalar($bCustomerName)) {
-                    $bCustomerLabel = (string) $bCustomerName;
-                } elseif (is_object($bCustomerName) && method_exists($bCustomerName, '__toString')) {
-                    $bCustomerLabel = (string) $bCustomerName;
-                } else {
-                    $bCustomerLabel = '';
-                }
-
-                return strcasecmp($aCustomerLabel, $bCustomerLabel);
+                // Same group: latest waybill number first (match getAllWaybills / flat view)
+                return self::sortRowsByWaybillNoDesc($a, $b);
             });
 
             // Second pass: build grouped data with counts
@@ -282,22 +625,22 @@ class KIT_Unified_Table
 
         ob_start();
 ?>
-        <div id="<?php echo esc_attr($container_id); ?>" class="w-full bg-white rounded-xl shadow-sm border border-gray-200" style="box-sizing: content-box;">
+        <div id="<?php echo esc_attr($container_id); ?>" class="kit-unified-table-wrap w-full max-w-full min-w-0 bg-white rounded-xl shadow-sm border border-gray-200 overflow-hidden" style="box-sizing: border-box;">
             <?php if ($options['title'] || $options['subtitle'] || $options['table_type'] || !empty($options['primary_action']) || !empty($options['sync_entity'])): ?>
-                <div class="px-6 pt-6 pb-4 mb-3 grid grid-cols-2 gap-4">
-                    <div class="flex items-center">
+                <div class="px-4 sm:px-6 pt-5 sm:pt-6 pb-3 grid grid-cols-1 sm:grid-cols-2 gap-3 sm:gap-4">
+                    <div class="min-w-0">
                         <?php if ($options['title']): ?>
-                            <h3 class="text-lg font-semibold text-gray-900 truncate"><?php echo esc_html($options['title']); ?></h3>
+                            <h3 class="text-lg font-semibold text-gray-900 leading-tight"><?php echo esc_html($options['title']); ?></h3>
                         <?php endif; ?>
                         <?php if ($options['subtitle']): ?>
-                            <p class="text-sm text-gray-600 ml-2"><?php echo esc_html($options['subtitle']); ?></p>
+                            <p class="text-sm text-gray-600 mt-0.5"><?php echo esc_html($options['subtitle']); ?></p>
                         <?php endif; ?>
                     </div>
-                    <div class="flex items-center justify-end gap-3">
+                    <div class="flex flex-wrap items-center justify-start sm:justify-end gap-2 sm:gap-3 min-w-0">
                         <?php if (!empty($options['primary_action'])): ?>
                             <!-- Primary Action Button -->
                             <a href="<?php echo esc_url($options['primary_action']['href'] ?? '#'); ?>"
-                                class="<?php echo esc_attr($options['primary_action']['class'] ?? 'px-4 py-2 bg-blue-600 text-white rounded-md hover:bg-blue-700 transition'); ?>">
+                                class="<?php echo esc_attr($options['primary_action']['class'] ?? 'w-full sm:w-auto text-center px-4 py-2 bg-blue-600 text-white rounded-md hover:bg-blue-700 transition'); ?>">
                                 <?php echo esc_html($options['primary_action']['label'] ?? 'Add New'); ?>
                             </a>
                         <?php endif; ?>
@@ -344,212 +687,162 @@ class KIT_Unified_Table
                     <p class="text-sm text-gray-500"><?php echo wp_kses_post($options['empty_message']); ?></p>
                 </div>
             <?php else: ?>
-                <!-- Header Row: View Toggles and Search -->
-                <div class="flex items-center justify-between gap-4 pt-6 pb-4 px-6 border-t border-gray-100">
-                    <div class="flex-shrink-0">
-                        <?php if ($options['table_type'] === true): ?>
-                            <!-- View Toggle Buttons -->
-                            <div class="inline-flex gap-4" role="group" aria-label="Table view toggle">
-                                <?php
-                                // Grouped view button
-                                $grouped_icon = '<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 21V5a2 2 0 00-2-2H7a2 2 0 00-2 2v16m14 0h2m-2 0h-5m-9 0H3m2 0h5M9 7h1m-1 4h1m4-4h1m-1 4h1m-5 10v-5a1 1 0 011-1h2a1 1 0 011 1v5m-4 0h4"></path>';
-                                echo KIT_Commons::renderButton('Grouped by City', 'primary', 'lg', [
-                                    'id' => 'view-toggle-grouped-' . esc_attr($table_id),
-                                    'type' => 'button',
-                                    'icon' => $grouped_icon,
-                                    'iconPosition' => 'left',
-                                    'classes' => 'view-toggle-btn rounded-none border-r-0 !rounded-none',
-                                    'data-view' => 'grouped',
-                                    'data-table-id' => $table_id,
-                                    'ariaLabel' => 'Group by City',
+                <?php
+                $show_toolbar = ($options['table_type'] === true) || ($options['searchable'] === true) || ($options['bulk_management'] === true);
+                $bulk_actions = $options['bulk_actions_list'] ?? [];
+                if (empty($bulk_actions)) {
+                    $bulk_actions = ['delete', 'export'];
+                }
+                $bulk_action_labels = self::bulkActionLabels();
+                $bulk_select_id = 'bulk-action-select-' . $table_id;
+                $view_is_grouped = ($view_param === 'grouped' && $hasGroupRows);
+                ?>
+                <?php if ($show_toolbar): ?>
+                <div
+                    id="kit-table-toolbar-<?php echo esc_attr($table_id); ?>"
+                    class="kit-table-toolbar"
+                    data-table-id="<?php echo esc_attr($table_id); ?>"
+                >
+                    <?php if ($options['table_type'] === true): ?>
+                        <div class="kit-table-seg" role="group" aria-label="<?php esc_attr_e('Table view', '08600-services-quotations'); ?>">
+                            <button
+                                type="button"
+                                id="view-toggle-infinite-<?php echo esc_attr($table_id); ?>"
+                                class="kit-table-seg__btn<?php echo $view_is_grouped ? '' : ' is-active'; ?>"
+                                data-view="infinite"
+                                data-table-id="<?php echo esc_attr($table_id); ?>"
+                                aria-pressed="<?php echo $view_is_grouped ? 'false' : 'true'; ?>"
+                            ><?php esc_html_e('All', '08600-services-quotations'); ?></button>
+                            <button
+                                type="button"
+                                id="view-toggle-grouped-<?php echo esc_attr($table_id); ?>"
+                                class="kit-table-seg__btn<?php echo $view_is_grouped ? ' is-active' : ''; ?>"
+                                data-view="grouped"
+                                data-table-id="<?php echo esc_attr($table_id); ?>"
+                                aria-pressed="<?php echo $view_is_grouped ? 'true' : 'false'; ?>"
+                            ><?php esc_html_e('By city', '08600-services-quotations'); ?></button>
+                        </div>
+                    <?php endif; ?>
 
-                                ]);
-
-                                // Infinite scroll button
-                                $infinite_icon = '<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 6h16M4 12h16M4 18h16"></path>';
-                                echo KIT_Commons::renderButton('All Waybills', 'secondary', 'lg', [
-                                    'id' => 'view-toggle-infinite-' . esc_attr($table_id),
-                                    'type' => 'button',
-                                    'icon' => $infinite_icon,
-                                    'iconPosition' => 'left',
-                                    'classes' => 'view-toggle-btn rounded-none !rounded-none',
-                                    'data-view' => 'infinite',
-                                    'data-table-id' => $table_id,
-                                    'ariaLabel' => 'Infinite Scroll (Newest First)'
-                                ]);
-                                ?>
-                            </div>
-                        <?php endif; ?>
-                    </div>
                     <?php if ($options['searchable'] === true): ?>
-                        <!-- Search with Filter Dropdown -->
-                        <div class="flex items-center gap-3 flex-1 max-w-2xl ml-auto">
-                            <div class="relative flex-1">
-                                <div class="absolute inset-y-0 left-0 pl-3 flex items-center pointer-events-none" style="z-index: 10;">
-                                    <svg class="h-4 w-4 text-gray-400" fill="none" stroke="currentColor" viewBox="0 0 24 24" style="width: 16px; height: 16px;">
-                                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z"></path>
-                                    </svg>
-                                </div>
-                                <input type="text"
-                                    id="infinite-table-search-<?php echo esc_attr($table_id); ?>"
-                                    class="block w-full pr-3 py-2.5 h-10 text-sm border border-gray-300 rounded-md bg-white placeholder-gray-400 text-gray-900 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-blue-500 transition-shadow"
-                                    style="padding-left: 2.75rem;"
-                                    placeholder="<?php echo esc_attr($options['search_placeholder']); ?>"
-                                    autocomplete="off"
-                                    aria-label="<?php echo esc_attr($options['search_placeholder']); ?>">
+                        <div class="kit-table-toolbar__find">
+                            <div class="kit-table-toolbar__search">
+                                <?php echo KIT_Commons::Linput([
+                                    'no_label' => true,
+                                    'label' => '',
+                                    'name' => '',
+                                    'id' => 'infinite-table-search-' . $table_id,
+                                    'type' => 'text',
+                                    'value' => '',
+                                    'placeholder' => $options['search_placeholder'],
+                                    'aria_label' => $options['search_placeholder'],
+                                    'preset' => '',
+                                    'class' => 'kit-table-toolbar__search-input',
+                                    'special' => 'autocomplete="off"',
+                                    'icon' => '<svg class="h-4 w-4 text-gray-400" fill="none" stroke="currentColor" viewBox="0 0 24 24" style="width: 16px; height: 16px;"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z"></path></svg>',
+                                ]); ?>
                             </div>
                             <?php if (!empty($options['search_filters'])): ?>
-                                <div class="relative flex-shrink-0">
-                                    <?php
-                                    $select_class = class_exists('KIT_Commons') ? KIT_Commons::selectClass() : 'text-xs w-full px-3 py-2 border border-gray-300 rounded-md shadow-sm focus:outline-none focus:ring-blue-500 focus:border-blue-500 bg-white';
-                                    $default_filter = $options['search_default_filter'] ?? ($options['search_filters'][0]['value'] ?? '');
-                                    ?>
-                                    <select id="search-filter-type-<?php echo esc_attr($table_id); ?>"
-                                        class="<?php echo esc_attr($select_class); ?> w-40 h-10 text-sm cursor-pointer pr-9"
-                                        style="-webkit-appearance: none; -moz-appearance: none; appearance: none; background-image: none;">
-                                        <?php foreach ($options['search_filters'] as $filter): ?>
-                                            <option value="<?php echo esc_attr($filter['value']); ?>" <?php echo ($filter['value'] === $default_filter) ? 'selected' : ''; ?>>
-                                                <?php echo esc_html($filter['label']); ?>
-                                            </option>
-                                        <?php endforeach; ?>
-                                    </select>
-                                    <div class="absolute inset-y-0 right-0 flex items-center pr-2.5 pointer-events-none" style="z-index: 10;">
-                                        <svg class="h-4 w-4 text-gray-400" fill="none" stroke="currentColor" viewBox="0 0 24 24" style="width: 16px; height: 16px;">
-                                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7"></path>
-                                        </svg>
-                                    </div>
-                                </div>
+                                <?php $default_filter = $options['search_default_filter'] ?? ($options['search_filters'][0]['value'] ?? ''); ?>
+                                <select
+                                    id="search-filter-type-<?php echo esc_attr($table_id); ?>"
+                                    class="kit-table-toolbar__filter"
+                                    aria-label="<?php esc_attr_e('Search in', '08600-services-quotations'); ?>"
+                                >
+                                    <?php foreach ($options['search_filters'] as $filter): ?>
+                                        <option value="<?php echo esc_attr($filter['value']); ?>" <?php echo ($filter['value'] === $default_filter) ? 'selected' : ''; ?>>
+                                            <?php echo esc_html($filter['label']); ?>
+                                        </option>
+                                    <?php endforeach; ?>
+                                </select>
                             <?php endif; ?>
                             <?php echo KIT_Commons::renderButton('', 'ghost', 'sm', [
                                 'type' => 'button',
                                 'id' => 'clear-infinite-search-' . esc_attr($table_id),
-                                'classes' => 'inline-flex items-center justify-center w-10 h-10 border border-gray-300 rounded-md bg-white text-gray-500 hover:bg-gray-50 hover:text-gray-700 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-blue-500 transition-colors flex-shrink-0',
+                                'classes' => 'kit-table-toolbar__icon-btn ' . KIT_Commons::unifiedTableSearchClearButtonExtraClasses(),
                                 'title' => 'Clear search',
                                 'ariaLabel' => 'Clear search',
                                 'iconOnly' => true,
+                                'noLoading' => true,
                                 'icon' => '<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"></path>',
                             ]); ?>
                             <?php
                             if (! empty($options['delivery_list_print']) && filter_var($options['delivery_list_print'], FILTER_VALIDATE_BOOLEAN)) :
-                                $print_list_icon = '<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M17 17h2a2 2 0 002-2v-4a2 2 0 00-2-2H9a2 2 0 00-2 2v4a2 2 0 002 2h2m2 4h6a2 2 0 002-2v-4a2 2 0 00-2-2H9a2 2 0 00-2 2v4a2 2 0 002 2zm8-12V5a2 2 0 00-2-2H9a2 2 0 00-2 2v4h10z"></path>';
-                                echo KIT_Commons::renderButton('Print delivery list', 'secondary', 'sm', [
+                                echo KIT_Commons::renderButton(__('Print', '08600-services-quotations'), 'secondary', 'sm', [
                                     'type' => 'button',
                                     'id' => 'print-delivery-list-' . esc_attr($table_id),
-                                    'classes' => 'inline-flex items-center gap-2 px-3 py-2 h-10 text-sm font-semibold border border-gray-300 rounded-md bg-white text-gray-800 hover:bg-gray-50 flex-shrink-0 whitespace-nowrap',
-                                    'icon' => $print_list_icon,
+                                    'classes' => 'kit-table-toolbar__print',
+                                    'icon' => '<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M17 17h2a2 2 0 002-2v-4a2 2 0 00-2-2H9a2 2 0 00-2 2v4a2 2 0 002 2h2m2 4h6a2 2 0 002-2v-4a2 2 0 00-2-2H9a2 2 0 00-2 2v4a2 2 0 002 2zm8-12V5a2 2 0 00-2-2H9a2 2 0 00-2 2v4h10z"></path>',
                                     'iconPosition' => 'left',
+                                    'noLoading' => true,
                                     'ariaLabel' => 'Print delivery list for visible waybills',
                                 ]);
                             endif;
                             ?>
                         </div>
                     <?php endif; ?>
-                </div>
 
-                <!-- Bulk Actions Bar -->
-                <?php if ($options['bulk_management'] === true): ?>
-                    <div id="bulk-actions-bar-<?php echo esc_attr($table_id); ?>" class="mb-4 mx-6 p-4 bg-gradient-to-r from-blue-50 to-indigo-50 border border-blue-200 rounded-lg shadow-sm transition-all duration-300" style="display: none;">
-                        <div class="flex items-center justify-between">
-                            <div class="flex items-center gap-4">
-                                <div class="flex items-center gap-2">
-                                    <svg class="w-5 h-5 text-blue-600" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z"></path>
-                                    </svg>
-                                    <span id="bulk-selected-count-<?php echo esc_attr($table_id); ?>" class="text-sm font-semibold text-gray-900">0 selected</span>
-                                </div>
-                                <div class="h-6 w-px bg-gray-300"></div>
-                                <div class="flex gap-2">
+                    <?php if ($options['bulk_management'] === true): ?>
+                        <div id="bulk-actions-bar-<?php echo esc_attr($table_id); ?>" class="kit-table-toolbar__bulk" hidden>
+                            <span id="bulk-selected-count-<?php echo esc_attr($table_id); ?>" class="kit-table-toolbar__count">0 selected</span>
+                            <label for="<?php echo esc_attr($bulk_select_id); ?>" class="sr-only"><?php esc_html_e('Action for selected rows', '08600-services-quotations'); ?></label>
+                            <select
+                                id="<?php echo esc_attr($bulk_select_id); ?>"
+                                class="kit-table-toolbar__select"
+                                data-bulk-action-select="1"
+                                disabled
+                            >
+                                <option value=""><?php esc_html_e('Choose action…', '08600-services-quotations'); ?></option>
+                                <?php foreach ($bulk_actions as $action): ?>
                                     <?php
-                                    $bulk_actions = $options['bulk_actions_list'] ?? [];
-                                    if (empty($bulk_actions)) {
-                                        // Default actions if none specified
-                                        $bulk_actions = ['delete', 'export'];
+                                    $action_key = is_string($action) ? $action : '';
+                                    $action_label = $bulk_action_labels[$action_key] ?? '';
+                                    if ($action_label === '') {
+                                        continue;
                                     }
-                                    foreach ($bulk_actions as $action):
-                                        $action_label = '';
-                                        $action_class = '';
-                                        $action_id = '';
-                                        switch ($action) {
-                                            case 'delete':
-                                                $action_label = 'Delete';
-                                                $action_class = 'bg-red-600 hover:bg-red-700 text-white';
-                                                $action_id = 'bulk-delete-' . $table_id;
-                                                break;
-                                            case 'export':
-                                                $action_label = 'Export to PDF';
-                                                $action_class = 'bg-blue-600 hover:bg-blue-700 text-white';
-                                                $action_id = 'bulk-export-' . $table_id;
-                                                break;
-                                            case 'packing_list':
-                                                $action_label = 'Packing list';
-                                                $action_class = 'bg-indigo-600 hover:bg-indigo-700 text-white';
-                                                $action_id = 'bulk-packing-' . $table_id;
-                                                break;
-                                            case 'status_active':
-                                                $action_label = 'Set Active';
-                                                $action_class = 'bg-green-600 hover:bg-green-700 text-white';
-                                                $action_id = 'bulk-active-' . $table_id;
-                                                break;
-                                            case 'status_inactive':
-                                                $action_label = 'Set Inactive';
-                                                $action_class = 'bg-gray-600 hover:bg-gray-700 text-white';
-                                                $action_id = 'bulk-inactive-' . $table_id;
-                                                break;
-                                        }
-                                        if ($action_label):
-                                            $bulk_icon = '';
-                                            if ($action === 'delete') {
-                                                $bulk_icon = '<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16"></path>';
-                                            } elseif ($action === 'export') {
-                                                $bulk_icon = '<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 10v6m0 0l-3-3m3 3l3-3m2 8H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z"></path>';
-                                            } elseif ($action === 'packing_list') {
-                                                $bulk_icon = '<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M20 7l-8-4-8 4m16 0l-8 4m8-4v10l-8 4m0-10L4 7m8 4v10M4 7v10l8 4"></path>';
-                                            } elseif ($action === 'status_active') {
-                                                $bulk_icon = '<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z"></path>';
-                                            } elseif ($action === 'status_inactive') {
-                                                $bulk_icon = '<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M10 14l2-2m0 0l2-2m-2 2l-2-2m2 2l2 2m7-2a9 9 0 11-18 0 9 9 0 0118 0z"></path>';
-                                            }
-                                            echo KIT_Commons::renderButton($action_label, 'primary', 'sm', [
-                                                'type' => 'button',
-                                                'id' => $action_id,
-                                                'classes' => 'inline-flex items-center gap-2 px-4 py-2 rounded-lg text-sm font-semibold shadow-sm transition-all duration-200 ' . $action_class . ' disabled:opacity-50 disabled:cursor-not-allowed hover:shadow-md active:scale-95',
-                                                'data-bulk-action' => $action,
-                                                'disabled' => true,
-                                                'icon' => $bulk_icon,
-                                                'iconPosition' => 'left',
-                                            ]);
                                     ?>
-                                    <?php
-                                        endif;
-                                    endforeach;
-                                    ?>
-                                </div>
-                            </div>
-                            <?php echo KIT_Commons::renderButton('Clear Selection', 'ghost', 'sm', [
+                                    <option value="<?php echo esc_attr($action_key); ?>"><?php echo esc_html($action_label); ?></option>
+                                <?php endforeach; ?>
+                            </select>
+                            <button
+                                type="button"
+                                id="bulk-action-ok-<?php echo esc_attr($table_id); ?>"
+                                class="kit-table-toolbar__ok"
+                                disabled
+                                aria-label="<?php esc_attr_e('Confirm action on selected waybills', '08600-services-quotations'); ?>"
+                            ><?php esc_html_e('OK', '08600-services-quotations'); ?></button>
+                            <?php echo KIT_Commons::renderButton(__('Clear', '08600-services-quotations'), 'ghost', 'sm', [
                                 'type' => 'button',
                                 'id' => 'bulk-clear-selection-' . esc_attr($table_id),
-                                'classes' => 'inline-flex items-center gap-1.5 px-3 py-1.5 text-sm font-medium text-gray-600 hover:text-gray-900 hover:bg-white rounded-md transition-colors',
+                                'classes' => 'kit-table-toolbar__clear',
+                                'noLoading' => true,
                                 'icon' => '<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"></path>',
                                 'iconPosition' => 'left',
                             ]); ?>
                         </div>
-                    </div>
+                    <?php endif; ?>
+                </div>
                 <?php endif; ?>
 
                 <!-- Table Container -->
-                <div class="px-6 overflow-x-auto">
-                            <table id="<?php echo esc_attr($table_id); ?>" class="<?php echo esc_attr($options['table_class']); ?>" style="width:100%;" <?php if ($hasGroupRows): ?> data-has-group-rows="1" <?php endif; ?> data-original-groupby="<?php echo esc_attr($original_groupby ?? ''); ?>" data-current-view="<?php echo ($view_param === 'infinite' || !$hasGroupRows) ? 'infinite' : 'grouped'; ?>">
-                                <thead class="bg-gray-50">
+                <div class="px-3 sm:px-6 overflow-x-auto max-w-full<?php echo $table_max_height !== '' ? ' kit-table-scroll' : ''; ?>"<?php echo $table_scroll_style !== '' ? ' style="' . $table_scroll_style . '"' : ''; ?>>
+                            <table id="<?php echo esc_attr($table_id); ?>" class="<?php echo esc_attr($options['table_class']); ?> min-w-0" style="width:100%;" <?php if ($hasGroupRows): ?> data-has-group-rows="1" <?php endif; ?> data-original-groupby="<?php echo esc_attr($original_groupby ?? ''); ?>" data-current-view="<?php echo ($view_param === 'grouped' && $hasGroupRows) ? 'grouped' : 'infinite'; ?>">
+                                <thead class="bg-gray-50<?php echo $table_max_height !== '' ? ' sticky top-0 z-10 shadow-sm' : ''; ?>">
                                     <tr>
                                         <?php if ($options['bulk_management'] === true): ?>
-                                            <!-- Bulk selection checkbox header -->
-                                            <th class="<?php echo esc_attr($options['header_base_class']); ?> w-12 text-center" style="width: 48px;">
-                                                <input type="checkbox"
-                                                    id="bulk-select-all-<?php echo esc_attr($table_id); ?>"
-                                                    class="bulk-select-all-checkbox w-5 h-5 rounded border-2 border-black bg-white text-blue-700 focus:ring-2 focus:ring-blue-600 focus:ring-offset-2 cursor-pointer transition-all shadow-sm"
-                                                    title="Select all"
-                                                    aria-label="Select all rows"
-                                                    style="display: inline-block; margin: 0; cursor: pointer; pointer-events: auto; opacity: 1; visibility: visible; accent-color: #1d4ed8;">
+                                            <!-- Bulk selection checkbox header (native hit target only — do not expand cell click to mass-select) -->
+                                            <th class="<?php echo esc_attr($options['header_base_class']); ?> w-12 text-center kit-bulk-select-all-cell" style="width: 48px;">
+                                                <?php
+                                                echo KIT_Commons::Lcheckbox([
+                                                    'no_label' => true,
+                                                    'label' => '',
+                                                    'name' => '',
+                                                    'id' => 'bulk-select-all-' . $table_id,
+                                                    'value' => '1',
+                                                    'class' => 'bulk-select-all-checkbox w-5 h-5 rounded border-2 border-black bg-white text-blue-700 focus:ring-2 focus:ring-blue-600 focus:ring-offset-2 cursor-pointer transition-all shadow-sm',
+                                                    'special' => 'title="Select all" aria-label="Select all rows" style="display: inline-block; margin: 0; cursor: pointer; pointer-events: auto; opacity: 1; visibility: visible; accent-color: #1d4ed8;"',
+                                                ]);
+                                                ?>
                                             </th>
                                         <?php endif; ?>
                                         <!-- Index column header -->
@@ -566,17 +859,23 @@ class KIT_Unified_Table
                                             if (is_array($column) && !empty($column['header_class'])) {
                                                 $headerClass = trim($headerClass . ' ' . $column['header_class']);
                                             }
+                                            // Row checkbox cells get kit-checkbox-only-cell; header select-all must not —
+                                            // an expanded header hit target selects every row with one click.
                                             $headerStyle = '';
                                             if (is_array($column) && !empty($column['header_style'])) {
                                                 $headerStyle = ' style="' . esc_attr($column['header_style']) . '"';
                                             }
-                                            // Check if header should be right-aligned
+                                            // Match sortable header flex to column alignment
                                             $isRightAligned = strpos($headerClass, 'text-right') !== false;
-                                            $flexJustify = $isRightAligned ? 'justify-end' : '';
+                                            $isCenterAligned = strpos($headerClass, 'text-center') !== false;
+                                            $flexJustify = $isRightAligned ? 'justify-end' : ($isCenterAligned ? 'justify-center' : '');
+                                            $headerCallback = is_array($column) && !empty($column['header_callback']) && is_callable($column['header_callback']);
                                             ?>
-                                            <th<?php if ($columnSortable): ?> data-column="<?php echo esc_attr($key); ?>" <?php endif; ?> class="<?php echo esc_attr($headerClass); ?>"<?php echo $headerStyle; ?>>
-                                                <?php if ($columnSortable): ?>
-                                                    <?php echo KIT_Commons::renderButton($label, 'ghost', 'sm', [
+                                            <th<?php if ($columnSortable && !$headerCallback): ?> data-column="<?php echo esc_attr($key); ?>" <?php endif; ?> class="<?php echo esc_attr($headerClass); ?>"<?php echo $headerStyle; ?>>
+                                                <?php if ($headerCallback): ?>
+                                                    <?php echo call_user_func($column['header_callback'], $column, $key); ?>
+                                                <?php elseif ($columnSortable): ?>
+                                                    <?php echo KIT_Commons::renderButton($label, 'ghost', 'lg', [
                                                         'type' => 'button',
                                                         'classes' => 'sortable-header flex items-center gap-2 border-0 shadow-none ' . esc_attr($flexJustify) . ' text-gray-700 hover:text-gray-900 font-semibold transition-colors group w-full',
                                                         'icon' => '<path fill-rule="evenodd" d="M5.293 7.293a1 1 0 011.414 0L10 10.586l3.293-3.293a1 1 0 111.414 1.414l-4 4a1 1 0 01-1.414 0l-4-4a1 1 0 010-1.414z" clip-rule="evenodd" />',
@@ -619,26 +918,18 @@ class KIT_Unified_Table
                                                 $headingCellClass = 'p-0 align-middle bg-transparent border-0';
                                             }
 
-                                            $gradientButtonClasses = 'inline-flex w-full items-center justify-between text-left font-semibold px-4 py-2 bg-gradient-to-r from-blue-600 to-indigo-600 hover:from-blue-700 hover:to-indigo-700 active:from-blue-800 active:to-indigo-800 text-white shadow-md hover:shadow-lg hover:-translate-y-0.5 transition-all duration-200 focus:outline-none focus:ring-2 focus:ring-blue-400 focus:ring-offset-2';
-                                            if (class_exists('KIT_Commons') && method_exists('KIT_Commons', 'buttonClass') && method_exists('KIT_Commons', 'buttonPrimary')) {
-                                                $baseButton = KIT_Commons::buttonClass();
-                                                $baseButton = str_replace('justify-center', 'justify-between', $baseButton);
-                                                $baseButton = str_replace('gap-2', 'gap-3', $baseButton);
-                                                $baseButton .= ' text-left w-full';
-                                                $typeButton = KIT_Commons::buttonPrimary('sm', true, true);
-                                                $gradientButtonClasses = trim($baseButton . ' ' . $typeButton . ' group-toggle');
-                                            } else {
-                                                $gradientButtonClasses .= ' group-toggle';
-                                            }
+                                            $gradientButtonClasses = class_exists('KIT_Commons')
+                                                ? KIT_Commons::unifiedTableGroupHeaderToggleButtonClasses()
+                                                : 'inline-flex w-full items-center justify-between text-left font-semibold px-4 py-2 bg-gradient-to-r from-blue-600 to-indigo-600 hover:from-blue-700 hover:to-indigo-700 active:from-blue-800 active:to-indigo-800 text-white shadow-md hover:shadow-lg hover:-translate-y-0.5 transition-all duration-200 focus:outline-none focus:ring-2 focus:ring-blue-400 focus:ring-offset-2 group-toggle';
 
                                             $iconClasses = 'group-toggle-icon w-4 h-4 text-white transition-transform duration-200';
                                         ?>
-                                            <tr class="<?php echo esc_attr($options['group_heading_row_class']); ?>" data-group-row="1" <?php if ($groupId): ?> data-group-id="<?php echo esc_attr($groupId); ?>" <?php endif; ?> data-collapsed="<?php echo $groupCollapsed ? '1' : '0'; ?>">
+                                            <tr class="<?php echo esc_attr($options['group_heading_row_class']); ?>" data-group-row="1" <?php if ($groupId): ?> data-group-id="<?php echo esc_attr($groupId); ?>" <?php endif; ?> data-group-label="<?php echo esc_attr($groupLabel); ?>" data-collapsed="<?php echo $groupCollapsed ? '1' : '0'; ?>">
                                                 <td colspan="<?php echo esc_attr($totalColumns); ?>" class="<?php echo esc_attr($headingCellClass); ?>">
                                                     <?php if ($isCollapsible): ?>
                                                         <?php
                                                         $groupBtnLabel = $groupCount > 0 ? '<span class="inline-flex items-center justify-center min-w-[1.5rem] h-6 px-2 text-xs font-semibold text-white bg-red-600 rounded-full leading-none">' . esc_html($groupCount) . '</span> ' . esc_html($headingContent) : 'Group';
-                                                        echo KIT_Commons::renderButton($groupBtnLabel, 'primary', 'sm', [
+                                                        echo KIT_Commons::renderButton($groupBtnLabel, 'primary', 'lg', [
                                                             'type' => 'button',
                                                             'classes' => $gradientButtonClasses,
                                                             'data-group-toggle' => $groupId,
@@ -718,21 +1009,32 @@ class KIT_Unified_Table
                                         <tr<?php echo $rowAttrStr; ?> class="<?php echo esc_attr($rowClass); ?>" data-row-id="<?php echo esc_attr(is_array($row) ? ($row['id'] ?? '') : (is_object($row) ? ($row->id ?? '') : '')); ?>">
                                             <?php if ($options['bulk_management'] === true): ?>
                                                 <!-- Bulk selection checkbox cell -->
-                                                <td class="<?php echo esc_attr($options['cell_base_class']); ?> w-12 text-center bulk-checkbox-cell cursor-pointer select-none" style="width: 48px; background-color: #f9fafb;">
+                                                <td class="<?php echo esc_attr($options['cell_base_class']); ?> w-12 text-center bulk-checkbox-cell kit-checkbox-only-cell cursor-pointer select-none" style="width: 48px; background-color: #f9fafb;">
                                                     <?php
-                                                    // Use waybill_no (waybill number) as the checkbox value, not the database ID
+                                                    // Prefer waybill number for waybills; otherwise numeric row id (drivers, deliveries, etc.)
                                                     if (is_array($row)) {
                                                         $row_id = $row['waybill_no'] ?? $row['waybill_no_raw'] ?? '';
+                                                        if ($row_id === '' || $row_id === null) {
+                                                            $row_id = isset($row['id']) ? (string) $row['id'] : '';
+                                                        }
                                                     } else {
-                                                        $row_id = $row->waybill_no ?? '';
+                                                        $row_id = $row->waybill_no ?? $row->waybill_no_raw ?? '';
+                                                        if ($row_id === '' || $row_id === null) {
+                                                            $row_id = isset($row->id) ? (string) $row->id : '';
+                                                        }
                                                     }
                                                     ?>
-                                                    <input type="checkbox"
-                                                        class="bulk-row-checkbox w-5 h-5 rounded border-2 border-black bg-white text-blue-700 focus:ring-2 focus:ring-blue-600 focus:ring-offset-2 cursor-pointer transition-all shadow-sm"
-                                                        value="<?php echo esc_attr($row_id); ?>"
-                                                        data-row-id="<?php echo esc_attr($row_id); ?>"
-                                                        aria-label="Select row"
-                                                        style="display: inline-block; margin: 0; cursor: pointer; pointer-events: auto; opacity: 1; visibility: visible; accent-color: #1d4ed8;">
+                                                    <?php
+                                                    echo KIT_Commons::Lcheckbox([
+                                                        'no_label' => true,
+                                                        'label' => '',
+                                                        'name' => '',
+                                                        'omit_id' => true,
+                                                        'value' => (string) $row_id,
+                                                        'class' => 'bulk-row-checkbox w-5 h-5 rounded border-2 border-black bg-white text-blue-700 focus:ring-2 focus:ring-blue-600 focus:ring-offset-2 cursor-pointer transition-all shadow-sm',
+                                                        'special' => 'data-row-id="' . esc_attr($row_id) . '" aria-label="Select row" style="display: inline-block; margin: 0; cursor: pointer; pointer-events: auto; opacity: 1; visibility: visible; accent-color: #1d4ed8;"',
+                                                    ]);
+                                                    ?>
                                                 </td>
                                             <?php endif; ?>
                                             <!-- Index column cell -->
@@ -742,6 +1044,9 @@ class KIT_Unified_Table
                                                 $cellClass = $options['cell_base_class'];
                                                 if (is_array($column) && isset($column['cell_class'])) {
                                                     $cellClass = trim($cellClass . ' ' . $column['cell_class']);
+                                                }
+                                                if ($key === 'checkbox') {
+                                                    $cellClass = trim($cellClass . ' kit-checkbox-only-cell cursor-pointer select-none text-center');
                                                 }
                                                 $cellStyle = '';
                                                 if (is_array($column) && !empty($column['cell_style'])) {
@@ -1186,24 +1491,17 @@ class KIT_Unified_Table
                     // Check URL parameter to determine current view
                     const urlParams = new URLSearchParams(window.location.search);
                     const urlView = urlParams.get('view');
-                    const currentView = urlView === 'infinite' ? 'infinite' : (originalGroupby ? 'grouped' : 'infinite');
+                    const currentView = (urlView === 'grouped' && originalGroupby) ? 'grouped' : 'infinite';
 
                     // Update table dataset to match current view
                     table.dataset.currentView = currentView;
 
-                    // Helper function to update button active state
                     function setButtonActive(btn, isActive) {
-                        if (isActive) {
-                            // Remove plain/inactive classes
-                            btn.classList.remove('bg-white', 'bg-gray-100', 'text-gray-700', 'text-black', 'border-gray-300', 'hover:bg-gray-50', 'hover:bg-gray-200');
-                            // Add gradient active classes
-                            btn.classList.add('bg-gradient-to-r', 'from-blue-600', 'to-indigo-600', 'text-white', 'border-blue-600', 'hover:from-blue-700', 'hover:to-indigo-700');
-                        } else {
-                            // Remove gradient/active classes
-                            btn.classList.remove('bg-gradient-to-r', 'from-blue-600', 'to-indigo-600', 'text-white', 'border-blue-600', 'hover:from-blue-700', 'hover:to-indigo-700', 'bg-blue-600', 'hover:bg-blue-700');
-                            // Add plain inactive classes
-                            btn.classList.add('bg-white', 'text-black', 'border-gray-300', 'hover:bg-gray-50');
+                        if (!btn) {
+                            return;
                         }
+                        btn.classList.toggle('is-active', !!isActive);
+                        btn.setAttribute('aria-pressed', isActive ? 'true' : 'false');
                     }
 
                     // Set initial button states
@@ -1443,8 +1741,13 @@ class KIT_Unified_Table
 
                                 if (!aCell || !bCell) return 0;
 
-                                let aVal = aCell.textContent?.trim() || '';
-                                let bVal = bCell.textContent?.trim() || '';
+                                // A cell may publish an explicit sort key (dates
+                                // render as "20 Aug 2026" but must sort as ISO).
+                                const aKey = aCell.querySelector('[data-sort-value]');
+                                const bKey = bCell.querySelector('[data-sort-value]');
+
+                                let aVal = aKey ? aKey.getAttribute('data-sort-value').trim() : (aCell.textContent?.trim() || '');
+                                let bVal = bKey ? bKey.getAttribute('data-sort-value').trim() : (bCell.textContent?.trim() || '');
 
                                 // Try to parse as numbers for numeric sorting
                                 const aNum = parseFloat(aVal.replace(/[^0-9.-]/g, ''));

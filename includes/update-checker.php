@@ -33,7 +33,6 @@ if (!class_exists('YahnisElsts\\PluginUpdateChecker\\v5\\PucFactory')) {
 }
 
 use YahnisElsts\PluginUpdateChecker\v5\PucFactory;
-use YahnisElsts\PluginUpdateChecker\v5p5\Vcs\Api as PucVcsApi;
 
 // Configure your GitHub repository details
 // Define these constants in wp-config.php or set them below.
@@ -54,31 +53,40 @@ if (!defined('KIT_GITHUB_BRANCH')) {
 
 $repoUrl = 'https://github.com/' . constant('KIT_GITHUB_PLUGIN_REPO');
 
-// Prefer the tracked branch over GitHub Releases/tags so "push to main" updates apply
-// even when no release exists or an old release would win. Register before buildUpdateChecker().
-add_filter(
-    'puc_vcs_update_detection_strategies-courier-finance-plugin',
-    static function ($strategies) {
-        if (!isset($strategies[PucVcsApi::STRATEGY_BRANCH])) {
-            return $strategies;
-        }
-        $branchStrategy = $strategies[PucVcsApi::STRATEGY_BRANCH];
-        unset($strategies[PucVcsApi::STRATEGY_BRANCH]);
-        return array_merge([PucVcsApi::STRATEGY_BRANCH => $branchStrategy], $strategies);
-    },
-    10,
-    1
-);
+// Prefer the tracked branch over GitHub Releases/tags so "push to main" updates apply.
+// Only enable branch-strategy prioritization when the installed PUC supports the v5p5 VCS API.
+if (class_exists('YahnisElsts\\PluginUpdateChecker\\v5p5\\Vcs\\Api')) {
+    add_filter(
+        'puc_vcs_update_detection_strategies-courier-finance-plugin',
+        static function ($strategies) {
+            $branchKey = \YahnisElsts\PluginUpdateChecker\v5p5\Vcs\Api::STRATEGY_BRANCH;
+            if (!isset($strategies[$branchKey])) {
+                return $strategies;
+            }
+            $branchStrategy = $strategies[$branchKey];
+            unset($strategies[$branchKey]);
+            return array_merge([$branchKey => $branchStrategy], $strategies);
+        },
+        10,
+        1
+    );
+}
 
-// PUC uses check period in hours (4th arg of buildUpdateChecker).
+// PUC version compatibility:
+// - Newer PUC supports a 4th arg (check period in hours) for buildUpdateChecker().
+// - Older PUC variants (often bundled by other plugins) may only accept 3 args.
 $check_period_hours = (defined('WP_DEBUG') && WP_DEBUG) ? 1 : 6;
+$build_args = [$repoUrl, $plugin_file, 'courier-finance-plugin'];
+try {
+    $rm = new ReflectionMethod(PucFactory::class, 'buildUpdateChecker');
+    if ($rm->getNumberOfParameters() >= 4) {
+        $build_args[] = $check_period_hours;
+    }
+} catch (Throwable $e) {
+    // If reflection fails for any reason, fall back to the 3-arg signature.
+}
 
-$updateChecker = PucFactory::buildUpdateChecker(
-    $repoUrl,
-    $plugin_file,
-    'courier-finance-plugin',
-    $check_period_hours
-);
+$updateChecker = call_user_func_array([PucFactory::class, 'buildUpdateChecker'], $build_args);
 
 // If your plugin main file header has Version matching a Git tag (e.g. v2.0.1), ensure tag format aligns.
 $updateChecker->setBranch(constant('KIT_GITHUB_BRANCH'));

@@ -143,13 +143,18 @@ if (empty($customers)
                 Select Customer
             </label>
             <div class="relative">
-                <input
-                    type="text"
-                    id="customer-search"
-                    name="customer_search"
-                    placeholder="Type to search customers..."
-                    class="block w-full rounded-lg border-2 border-gray-300 focus:border-blue-500 focus:ring-2 focus:ring-blue-200 transition-all px-4 py-3 bg-white text-gray-800 text-base"
-                    autocomplete="off">
+                <?php echo KIT_Commons::Linput([
+                    'no_label' => true,
+                    'label' => '',
+                    'name' => 'customer_search',
+                    'id' => 'customer-search',
+                    'type' => 'text',
+                    'value' => '',
+                    'placeholder' => 'Type to search customers...',
+                    'preset' => '',
+                    'class' => 'block w-full rounded-lg border-2 border-gray-300 focus:border-blue-500 focus:ring-2 focus:ring-blue-200 transition-all px-4 py-3 bg-white text-gray-800 text-base',
+                    'special' => 'autocomplete="off"',
+                ]); ?>
                 <input type="hidden" id="customer-select" name="customer_select" value="<?php echo !empty($customer_id) ? $customer_id : 'new'; ?>">
 
                 <div id="customer-results" class="absolute z-50 w-full mt-2 bg-white border border-gray-300 rounded-lg shadow-xl hidden max-h-60 overflow-y-auto">
@@ -184,155 +189,98 @@ if (empty($customers)
                 Client Type
             </label>
             <div class="flex gap-6">
-                <label class="inline-flex items-center cursor-pointer">
-                    <input type="radio" name="client_type" id="client_type_business" value="business" class="client-type-radio w-4 h-4 text-blue-600 focus:ring-blue-500" checked>
-                    <span class="ml-2 text-gray-700 font-medium">Business</span>
-                </label>
-                <label class="inline-flex items-center cursor-pointer">
-                    <input type="radio" name="client_type" id="client_type_individual" value="individual" class="client-type-radio w-4 h-4 text-blue-600 focus:ring-blue-500">
-                    <span class="ml-2 text-gray-700 font-medium">Individual</span>
-                </label>
+                <?php
+                echo KIT_Commons::Lradio([
+                    'name' => 'client_type',
+                    'id' => 'client_type_business',
+                    'value' => 'business',
+                    'label' => 'Business',
+                    'checked' => true,
+                    'class' => 'client-type-radio',
+                ]);
+                echo KIT_Commons::Lradio([
+                    'name' => 'client_type',
+                    'id' => 'client_type_individual',
+                    'value' => 'individual',
+                    'label' => 'Individual',
+                    'checked' => false,
+                    'class' => 'client-type-radio',
+                ]);
+                ?>
             </div>
+            <input type="hidden" name="company_id" id="company_id" value="<?php
+                echo esc_attr((string) ($company_id ?? ($customer->company_id ?? ($_POST['company_id'] ?? '0'))));
+            ?>">
         </div>
     </div>
     
     <!-- Section 2: Customer Details Form (Conditionally Visible) -->
     <div id="customer-details-form" class="<?php echo ($is_existing_customer && !empty($customer_id)) ? 'show' : ''; ?>">
-        <!-- Personal Information Group -->
-        <div class="field-group">
-            <div class="field-group-title">
-                <svg class="inline-block w-4 h-4 mr-1" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M16 7a4 4 0 11-8 0 4 4 0 018 0zM12 14a7 7 0 00-7 7h14a7 7 0 00-7-7z" />
-                </svg>
-                Personal Information
-            </div>
-            <div class="space-y-4">
-                <div id="company_name_wrapper">
-                    <?= KIT_Commons::Linput([
-                        'label' => 'Company Name',
-                        'name'  => 'company_name',
-                        'id'    => 'company_name',
-                        'type'  => 'text',
-                        'value' => esc_attr($is_existing_customer ? $customer->company_name ?? $customer->customer_name : ''),
-                        'class' => 'w-full rounded-lg border border-gray-300 focus:border-blue-500 focus:ring-2 focus:ring-blue-200 px-4 py-3 text-gray-800 bg-white transition',
-                        'special' => 'autocomplete="organization"'
-                    ]); ?>
-                </div>
-                <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
-                    <div>
-                        <?= KIT_Commons::Linput([
-                            'label' => 'Customer Name',
-                            'name'  => 'customer_name',
-                            'id'    => 'customer_name',
-                            'type'  => 'text',
-                            'value' => esc_attr($is_existing_customer ? $customer->customer_name : ''),
-                            'class' => 'w-full rounded-lg border border-gray-300 focus:border-blue-500 focus:ring-2 focus:ring-blue-200 px-4 py-3 text-gray-800 bg-white transition',
-                            'special' => 'autocomplete="given-name"'
-                        ]); ?>
-                    </div>
-                    <div>
-                        <?= KIT_Commons::Linput([
-                            'label' => 'Customer Surname',
-                            'name'  => 'customer_surname',
-                            'id'    => 'customer_surname',
-                            'type'  => 'text',
-                            'value' => esc_attr($is_existing_customer ? $customer->customer_surname : ''),
-                            'class' => 'w-full rounded-lg border border-gray-300 focus:border-blue-500 focus:ring-2 focus:ring-blue-200 px-4 py-3 text-gray-800 bg-white transition',
-                            'special' => 'autocomplete="family-name"'
-                        ]); ?>
-                    </div>
-                </div>
-            </div>
-        </div>
-        
-        <!-- Contact Information Group -->
-        <div class="field-group">
-            <div class="field-group-title">
-                <svg class="inline-block w-4 h-4 mr-1" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M3 8l7.89 5.26a2 2 0 002.22 0L21 8M5 19h14a2 2 0 002-2V7a2 2 0 00-2-2H5a2 2 0 00-2 2v10a2 2 0 002 2z" />
-                </svg>
-                Contact Information
-            </div>
-            <div class="space-y-4">
-                <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
-                    <div>
-                        <?= KIT_Commons::Linput([
-                            'label' => 'Cell',
-                            'name'  => 'cell',
-                            'id'    => 'cell',
-                            'type'  => 'tel',
-                            'value' => esc_attr($is_existing_customer ? $customer->cell : ''),
-                            'class' => 'w-full rounded-lg border border-gray-300 focus:border-blue-500 focus:ring-2 focus:ring-blue-200 px-4 py-3 text-gray-800 bg-white transition',
-                            'special' => 'autocomplete="tel" required'
-                        ]); ?>
-                    </div>
-                    <div>
-                        <?= KIT_Commons::Linput([
-                            'label' => 'Telephone',
-                            'name'  => 'telephone',
-                            'id'    => 'telephone',
-                            'type'  => 'tel',
-                            'value' => esc_attr($is_existing_customer ? $customer->cell : ''),
-                            'class' => 'w-full rounded-lg border border-gray-300 focus:border-blue-500 focus:ring-2 focus:ring-blue-200 px-4 py-3 text-gray-800 bg-white transition',
-                            'special' => 'autocomplete="tel"'
-                        ]); ?>
-                    </div>
-                </div>
-                <div>
-                    <?= KIT_Commons::Linput([
-                        'label' => 'Email',
-                        'name'  => 'email_address',
-                        'id'    => 'email_address',
-                        'type'  => 'email',
-                        'value' => esc_attr($is_existing_customer ? $customer->email_address : ''),
-                        'class' => 'w-full rounded-lg border border-gray-300 focus:border-blue-500 focus:ring-2 focus:ring-blue-200 px-4 py-3 text-gray-800 bg-white transition',
-                        'special' => 'autocomplete="email"'
-                    ]); ?>
-                </div>
-                <div>
-                    <?= KIT_Commons::Linput([
-                        'label' => 'Address',
-                        'name'  => 'address',
-                        'id'    => 'address',
-                        'type'  => 'text',
-                        'value' => esc_attr($is_existing_customer ? $customer->address : ''),
-                        'class' => 'w-full rounded-lg border border-gray-300 focus:border-blue-500 focus:ring-2 focus:ring-blue-200 px-4 py-3 text-gray-800 bg-white transition',
-                        'special' => 'autocomplete="street-address" required'
-                    ]); ?>
-                </div>
-                <div>
-                    <?= KIT_Commons::Linput([
-                        'label' => 'Notes (optional)',
-                        'name'  => 'customer_notes',
-                        'id'    => 'customer_notes',
-                        'type'  => 'text',
-                        'value' => '',
-                        'class' => 'w-full rounded-lg border border-gray-300 focus:border-blue-500 focus:ring-2 focus:ring-blue-200 px-4 py-3 text-gray-800 bg-white transition',
-                    ]); ?>
-                </div>
-            </div>
-        </div>
-        
-        <!-- Location Information Group -->
-        <div class="field-group">
-            <div class="field-group-title">
-                <svg class="inline-block w-4 h-4 mr-1" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M17.657 16.657L13.414 20.9a1.998 1.998 0 01-2.827 0l-4.244-4.243a8 8 0 1111.314 0z" />
-                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 11a3 3 0 11-6 0 3 3 0 016 0z" />
-                </svg>
-                Origin Location
-            </div>
-            <div>
-                <?php require(COURIER_FINANCE_PLUGIN_PATH . 'includes/components/selectsOrigin.php'); ?>
-            </div>
-        </div>
+        <?php
+        require_once COURIER_FINANCE_PLUGIN_PATH . 'includes/customers/_customersForm.php';
+
+        $customer_for_form = null;
+        if (!empty($is_existing_customer) && !empty($customer)) {
+            $c = is_object($customer) ? get_object_vars($customer) : (array) $customer;
+            $customer_for_form = [
+                'cust_id' => $c['cust_id'] ?? $customer_id,
+                'company_name' => $c['company_name'] ?? '',
+                'name' => $c['customer_name'] ?? $c['name'] ?? '',
+                'surname' => $c['customer_surname'] ?? $c['surname'] ?? '',
+                'cell' => $c['cell'] ?? '',
+                'email_address' => $c['email_address'] ?? '',
+                'address' => $c['address'] ?? '',
+                'country_id' => $c['country_id'] ?? 0,
+                'city_id' => $c['city_id'] ?? 0,
+                'telephone' => isset($c['telephone']) ? (string) $c['telephone'] : '',
+            ];
+        }
+
+        $waybill_for_origin = kit_customers_form_waybill_as_array(isset($waybill) ? $waybill : []);
+
+        echo kit_render_customers_form_fields($customer_for_form, [
+            'show_vat' => false,
+            'show_hidden_cust_id' => false,
+            'person_name_input_names' => 'waybill',
+            'company_name_wrapper_id' => 'company_name_wrapper',
+            'omit_location_section' => false,
+            'waybill_origin_context' => [
+                'waybill' => $waybill_for_origin,
+                'delivery' => isset($delivery) ? $delivery : null,
+                'customer' => isset($customer) ? $customer : null,
+                'waybillFromStats' => (isset($waybillFromStats) && is_array($waybillFromStats)) ? $waybillFromStats : [],
+            ],
+            'location_section_title' => 'Origin Location',
+            'origin_country_label' => 'Origin Country',
+            'origin_city_label' => 'Origin City',
+            'show_telephone' => true,
+            'show_customer_notes' => true,
+        ]);
+        ?>
     </div>
     
     <!-- Summary Bar -->
     <div class="sticky top-16 z-10 mt-6 rounded-lg border border-gray-200 bg-white/90 backdrop-blur px-4 py-3 shadow-sm">
         <div class="flex flex-wrap gap-3 text-sm text-gray-700">
             <div><span class="font-semibold">Waybill #:</span> <?php echo isset($waybill_no) ? esc_html($waybill_no) : (isset($_POST['waybill_no']) ? esc_html($_POST['waybill_no']) : '—'); ?></div>
-            <div><span class="font-semibold">Customer:</span> <?php echo $is_existing_customer ? esc_html(trim(($customer->company_name ?? $customer->customer_name ?? '') . ' ' . ($customer->customer_surname ?? ''))) : '—'; ?></div>
+            <div><span class="font-semibold">Customer:</span> <?php
+                if ($is_existing_customer) {
+                    $summary_company = trim((string) ($customer->company_name ?? ''));
+                    $summary_person = trim(trim((string) ($customer->customer_name ?? $customer->name ?? '')) . ' ' . trim((string) ($customer->customer_surname ?? $customer->surname ?? '')));
+                    $summary_company_ok = $summary_company !== '' && !in_array(strtolower($summary_company), ['individual', '1ndividual', 'private'], true);
+                    if ($summary_company_ok && $summary_person !== '' && strcasecmp($summary_person, $summary_company) !== 0
+                        && !(function_exists('kit_seed_customer_looks_like_business') && kit_seed_customer_looks_like_business($summary_person))) {
+                        $summary_display = $summary_company;
+                    } elseif ($summary_company_ok) {
+                        $summary_display = $summary_company;
+                    } else {
+                        $summary_display = $summary_person !== '' ? $summary_person : $summary_company;
+                    }
+                    echo esc_html($summary_display !== '' ? $summary_display : '—');
+                } else {
+                    echo '—';
+                }
+            ?></div>
             <div><span class="font-semibold">Origin:</span> <span id="summary-origin">—</span></div>
             <div><span class="font-semibold">Items:</span> <span id="summary-items">0</span></div>
         </div>
@@ -431,8 +379,13 @@ if (empty($customers)
         const cellInput = getCustomerInput('cell');
         const addressInput = getCustomerInput('address');
         const emailInput = getCustomerInput('email_address');
+        const telephoneInput = document.getElementById('telephone');
+        const customerNotesInput = document.getElementById('customer_notes');
 
         function searchCustomers(query) {
+            if (!customerResults) {
+                return;
+            }
             if (!query || query.length < 2) {
                 customerResults.classList.add('hidden');
                 return;
@@ -462,6 +415,9 @@ if (empty($customers)
         }
 
         function displaySearchResults(results, selectionOptions = {}) {
+            if (!customerResults) {
+                return;
+            }
             customerResults.innerHTML = '';
             if (results.length === 0) {
                 customerResults.innerHTML = '<div class="px-4 py-3 text-gray-500 text-sm text-center">No customers found</div>';
@@ -492,10 +448,15 @@ if (empty($customers)
             return requiredFields.some(value => !String(value ?? '').trim());
         }
 
+        function kitDispatchWaybillCustomerContextChanged() {
+            document.dispatchEvent(new CustomEvent('kitWaybillCustomerContextChanged'));
+        }
+
         function selectCustomer(customer, options = {}) {
             const {
                 openForm = true,
-                openFormIfMissingRequired = false
+                openFormIfMissingRequired = false,
+                prefillFromLastWaybill = false
             } = options;
 
             const displayName = `${customer.customer_name || ''} ${customer.customer_surname || ''}`.trim();
@@ -511,6 +472,14 @@ if (empty($customers)
             }
             showSelectedCustomerBadge(displayName);
             populateCustomerDetails(customer.cust_id);
+            kitDispatchWaybillCustomerContextChanged();
+
+            // Recent Customers: reuse that customer's last waybill (except mass + parcels).
+            if (prefillFromLastWaybill && customer && customer.cust_id) {
+                if (typeof window.kitPrefillFromCustomerLastWaybill === 'function') {
+                    window.kitPrefillFromCustomerLastWaybill(customer.cust_id);
+                }
+            }
         }
 
         function addNewCustomer() {
@@ -521,6 +490,7 @@ if (empty($customers)
             showCustomerForm();
             hideSelectedCustomerBadge();
             clearCustomerFields();
+            kitDispatchWaybillCustomerContextChanged();
         }
 
         function showRecentCustomers() {
@@ -531,7 +501,8 @@ if (empty($customers)
             if (lastCustId && window.CUSTOMERS_DATA && window.CUSTOMERS_DATA[lastCustId]) {
                 selectCustomer(window.CUSTOMERS_DATA[lastCustId], {
                     openForm: false,
-                    openFormIfMissingRequired: true
+                    openFormIfMissingRequired: true,
+                    prefillFromLastWaybill: true
                 });
                 return;
             }
@@ -546,7 +517,8 @@ if (empty($customers)
             }
             displaySearchResults(recentCustomers, {
                 openForm: false,
-                openFormIfMissingRequired: true
+                openFormIfMissingRequired: true,
+                prefillFromLastWaybill: true
             });
         }
 
@@ -561,12 +533,15 @@ if (empty($customers)
             const da = customer.address || '';
             const de = customer.email_address || '';
             const dco = customer.company_name || customer.customer_name || '';
+            const dtel = customer.telephone || '';
             if (nameInput) nameInput.value = dn;
             if (surnameInput) surnameInput.value = ds;
             if (cellInput) cellInput.value = dc;
             if (addressInput) addressInput.value = da;
             if (emailInput) emailInput.value = de;
             if (companyNameInput) companyNameInput.value = dco;
+            if (telephoneInput) telephoneInput.value = dtel;
+            if (customerNotesInput) customerNotesInput.value = '';
             if (custIdInput) custIdInput.value = customerId;
             updateCompanyNameVisibility();
             populateOriginFromCustomer(customerId);
@@ -588,6 +563,11 @@ if (empty($customers)
                 loadCitiesForCountry(originCountryId, 'origin', customerData.city_id);
             }
         }
+
+        // Expose for last-waybill prefill (kitscript) without duplicating city AJAX.
+        window.kitLoadCitiesForCountry = function(countryId, fieldName, defaultCityId) {
+            loadCitiesForCountry(countryId, fieldName, defaultCityId);
+        };
 
         function loadCitiesForCountry(countryId, fieldName, defaultCityId) {
             if (!countryId) return;
@@ -670,6 +650,8 @@ if (empty($customers)
             if (addressInput) addressInput.value = '';
             if (emailInput) emailInput.value = '';
             if (companyNameInput) companyNameInput.value = '';
+            if (telephoneInput) telephoneInput.value = '';
+            if (customerNotesInput) customerNotesInput.value = '';
             if (custIdInput) custIdInput.value = '0';
             const businessRadio = document.getElementById('client_type_business');
             if (businessRadio) businessRadio.checked = true;
@@ -686,12 +668,15 @@ if (empty($customers)
                 }
             });
             document.addEventListener('click', function(e) {
+                if (!customerSearch || !customerResults) {
+                    return;
+                }
                 if (!customerSearch.contains(e.target) && !customerResults.contains(e.target)) {
                     customerResults.classList.add('hidden');
                 }
             });
             customerSearch.addEventListener('keydown', function(e) {
-                if (e.key === 'Escape') {
+                if (e.key === 'Escape' && customerResults) {
                     customerResults.classList.add('hidden');
                 }
             });
@@ -719,6 +704,7 @@ if (empty($customers)
             hideCustomerForm();
             hideSelectedCustomerBadge();
         }
+        kitDispatchWaybillCustomerContextChanged();
         
         // Add required field indicators (red asterisks)
         function addRequiredIndicators() {

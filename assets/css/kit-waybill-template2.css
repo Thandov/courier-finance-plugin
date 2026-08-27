@@ -1,0 +1,429 @@
+/**
+ * Waybill template 2 — readable for an older operator and fast for young staff.
+ * Larger type, stronger contrast, 44px controls. Not a “senior mode” skin.
+ */
+.kit-t2 {
+    --ink: #111111;
+    --muted: #3f3f46;
+    --line: #d4d4d8;
+    --paper: #fff;
+    color: var(--ink);
+    background: var(--paper);
+    font-size: 16px;
+    line-height: 1.45;
+}
+
+.kit-t2 input[type="text"],
+.kit-t2 input[type="number"],
+.kit-t2 input[type="email"],
+.kit-t2 input[type="tel"],
+.kit-t2 select,
+.kit-t2 textarea {
+    font-size: 16px !important;
+    min-height: 44px;
+    max-width: none !important;
+    line-height: 1.3;
+}
+
+.kit-t2 label,
+.kit-t2 .kit-t2-kicker,
+.kit-t2 .kit-t2-route-end {
+    font-size: 14px !important;
+    letter-spacing: 0;
+    text-transform: none;
+    color: var(--muted);
+    font-weight: 650;
+}
+
+.kit-t2-bar {
+    position: sticky;
+    top: 32px;
+    z-index: 20;
+    background: #fff;
+    border-bottom: 1px solid var(--line);
+    padding: 12px 0 14px;
+    margin-bottom: 18px;
+    display: flex;
+    flex-wrap: wrap;
+    align-items: flex-end;
+    justify-content: space-between;
+    gap: 12px;
+}
+
+.kit-t2-wb {
+    margin: 0;
+    font-variant-numeric: tabular-nums;
+    font-size: 1.75rem;
+    font-weight: 700;
+    letter-spacing: -0.02em;
+    line-height: 1.15;
+}
+
+.kit-t2-meta {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 8px 14px;
+    margin-top: 6px;
+    font-size: 15px;
+    color: var(--muted);
+}
+
+.kit-t2-status {
+    font-size: 14px;
+    letter-spacing: 0;
+    text-transform: none;
+    font-weight: 700;
+}
+
+.kit-t2-status--pending { color: #92400e; }
+.kit-t2-status--rejected { color: #991b1b; }
+.kit-t2-status--ok { color: #14532d; }
+
+.kit-t2-actions {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 10px;
+    align-items: center;
+}
+
+.kit-t2-actions a,
+.kit-t2-actions button {
+    min-height: 44px;
+}
+
+.kit-t2-context {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px 20px;
+    font-size: 15px;
+    color: var(--muted);
+    padding: 0 0 16px;
+    border-bottom: 1px solid var(--line);
+    margin-bottom: 20px;
+}
+
+.kit-t2-context b { color: var(--ink); font-weight: 700; }
+
+.kit-t2-shell {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) minmax(260px, 340px);
+    gap: 36px;
+    align-items: start;
+}
+
+.kit-t2-sec {
+    padding: 22px 0;
+    border-bottom: 1px solid var(--line);
+}
+
+.kit-t2-sec:last-child { border-bottom: 0; }
+
+.kit-t2-kicker { margin-bottom: 8px; }
+
+.kit-t2-title {
+    font-size: 1.35rem;
+    font-weight: 700;
+    margin: 0 0 6px;
+}
+
+.kit-t2-sub {
+    font-size: 16px;
+    color: var(--muted);
+}
+
+.kit-t2-facts {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 12px 20px;
+    margin-top: 14px;
+    font-size: 16px;
+}
+
+.kit-t2-facts dt {
+    color: var(--muted);
+    font-size: 14px;
+}
+
+.kit-t2-facts dd {
+    margin: 0;
+    font-weight: 650;
+}
+
+.kit-t2-cargo { display: grid; grid-template-columns: 1fr; gap: 28px; }
+.kit-t2-cargo-block { min-width: 0; padding-bottom: 4px; }
+
+.kit-t2-cargo input[type="text"],
+.kit-t2-cargo input[type="number"],
+.kit-t2-cargo .dimension-input {
+    width: 100% !important;
+    max-width: none !important;
+}
+
+.kit-t2-cargo .flex.flex-row.gap-4.justify-start.items-start {
+    display: grid !important;
+    grid-template-columns: minmax(0, 1fr) 1.5rem minmax(0, 1fr) 1.5rem minmax(0, 1fr);
+    align-items: end;
+    gap: 0.6rem;
+}
+
+.kit-t2-cargo .flex.flex-row.gap-4.justify-start.items-start > div {
+    min-width: 0;
+    width: auto;
+    margin-top: 0 !important;
+    height: auto !important;
+    padding: 0;
+}
+
+.kit-t2-cargo .flex.flex-row.gap-4.justify-start.items-start > div[aria-hidden="true"] {
+    height: 44px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    color: var(--muted);
+    font-weight: 700;
+    font-size: 18px;
+}
+
+.kit-t2-cargo .grid.grid-cols-3 { gap: 0.6rem; margin-bottom: 12px; }
+.kit-t2 #ttt { display: none; }
+
+.kit-t2-route-grid {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) 32px minmax(0, 1fr);
+    gap: 12px 16px;
+    align-items: start;
+}
+
+.kit-t2-route-col { display: grid; gap: 12px; min-width: 0; }
+.kit-t2-route-col > div { min-width: 0; }
+.kit-t2-route-col select { width: 100%; }
+.kit-t2-route-place { font-size: 1.125rem; font-weight: 700; }
+.kit-t2-route-arrow {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    color: var(--muted);
+    font-size: 22px;
+    padding-top: 22px;
+}
+.kit-t2-route-assign { margin-top: 16px; min-width: 0; }
+
+.kit-t2-formula {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) 1.5rem minmax(0, 1fr) 1.5rem minmax(0, 1fr);
+    gap: 8px;
+    align-items: end;
+    margin-top: 8px;
+}
+
+/* Charge present but its terms were never captured, so there is no equation to show. */
+.kit-t2-formula.is-incomplete {
+    grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+}
+
+.kit-t2-formula dt { font-size: 14px; color: var(--muted); }
+.kit-t2-formula dd {
+    margin: 0;
+    font-variant-numeric: tabular-nums;
+    font-weight: 700;
+    font-size: 18px;
+}
+
+.kit-t2-op {
+    display: flex;
+    align-items: flex-end;
+    justify-content: center;
+    height: 1.75rem;
+    color: var(--muted);
+    font-weight: 700;
+    font-size: 18px;
+}
+
+.kit-t2-dims {
+    display: grid;
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    gap: 8px;
+    margin-bottom: 12px;
+}
+
+.kit-t2-table { width: 100%; border-collapse: collapse; font-size: 16px; }
+.kit-t2-table th {
+    text-align: left;
+    font-size: 14px;
+    letter-spacing: 0;
+    text-transform: none;
+    color: var(--muted);
+    font-weight: 650;
+    padding: 8px 0;
+    border-bottom: 1px solid var(--line);
+}
+.kit-t2-table td { padding: 10px 0; border-bottom: 1px solid var(--line); }
+.kit-t2-table .num { text-align: right; font-variant-numeric: tabular-nums; }
+
+.kit-t2-rail {
+    position: sticky;
+    top: 108px;
+    border: 1px solid var(--line);
+    padding: 18px 16px 16px;
+    background: #fafafa;
+}
+
+.kit-t2-rail h2 {
+    font-size: 16px;
+    letter-spacing: 0;
+    text-transform: none;
+    color: var(--ink);
+    font-weight: 700;
+    margin: 0 0 12px;
+}
+
+.kit-t2-row {
+    display: flex;
+    justify-content: space-between;
+    gap: 12px;
+    font-size: 16px;
+    padding: 8px 0;
+}
+
+.kit-t2-row span:last-child { font-variant-numeric: tabular-nums; font-weight: 600; }
+.kit-t2-row.is-active span:last-child { font-weight: 800; }
+
+/* Context rows: the base an amount is derived from, subordinate to the charge itself. */
+.kit-t2-row.is-muted { color: #52525b; font-size: 14px; padding-bottom: 2px; }
+.kit-t2-row.is-muted span:last-child { font-weight: 500; }
+.kit-t2-row small { display: block; font-size: 12px; font-weight: 400; color: #71717a; }
+
+.kit-t2-basis { display: flex; border: 1px solid #a1a1aa; margin: 10px 0 12px; }
+.kit-t2-basis input { position: absolute; opacity: 0; pointer-events: none; }
+.kit-t2-basis label,
+.kit-t2-basis span {
+    flex: 1;
+    text-align: center;
+    font-size: 14px;
+    letter-spacing: 0;
+    text-transform: none;
+    padding: 12px 6px;
+    cursor: pointer;
+    color: #3f3f46;
+    min-height: 44px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+}
+
+.kit-t2-basis input:checked + label,
+.kit-t2-basis span.is-on {
+    background: #111111;
+    color: #fff;
+    font-weight: 700;
+}
+
+.kit-t2-hint {
+    font-size: 14px;
+    color: var(--muted);
+    line-height: 1.45;
+    margin: 0 0 12px;
+}
+
+.kit-t2-total {
+    border-top: 2px solid var(--ink);
+    margin-top: 12px;
+    padding-top: 12px;
+    display: flex;
+    justify-content: space-between;
+    align-items: baseline;
+}
+
+.kit-t2-total strong {
+    font-size: 1.5rem;
+    font-variant-numeric: tabular-nums;
+    letter-spacing: -0.02em;
+}
+
+.kit-t2-foot {
+    position: sticky;
+    bottom: 0;
+    background: #fff;
+    border-top: 1px solid var(--line);
+    padding: 12px 0;
+    margin-top: 24px;
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    gap: 12px;
+    z-index: 15;
+}
+
+.kit-t2-foot .kit-t2-foot-total {
+    font-variant-numeric: tabular-nums;
+    font-weight: 750;
+    font-size: 1.25rem;
+}
+
+.kit-t2-foot button,
+.kit-t2-foot input[type="submit"] { min-height: 48px; }
+
+.kit-t2-tools {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 14px 18px;
+    align-items: end;
+    padding: 16px 0 0;
+    border-top: 1px solid var(--line);
+    margin-top: 12px;
+}
+
+@media (max-width: 960px) {
+    .kit-t2-shell { grid-template-columns: 1fr; }
+    .kit-t2-rail { position: static; }
+    .kit-t2-bar { top: 0; }
+    .kit-t2-facts { grid-template-columns: 1fr; }
+}
+
+.kit-create-t2 #kit-waybill-step-indicator,
+.kit-create-t2 .next-step,
+.kit-create-t2 .prev-step {
+    display: none !important;
+}
+
+.kit-create-t2 .step,
+.kit-create-t2 .step.hidden {
+    display: block !important;
+    visibility: visible;
+}
+
+.kit-create-t2 #step-4 {
+    display: none !important;
+}
+
+.kit-create-t2 .step {
+    padding: 8px 0 24px;
+    border-bottom: 1px solid #d4d4d8;
+    margin-bottom: 8px;
+}
+
+.kit-create-t2 .step:last-of-type {
+    border-bottom: 0;
+}
+
+.kit-create-t2 .bg-white.shadow,
+.kit-create-t2 .shadow-md,
+.kit-create-t2 .rounded-lg.shadow {
+    box-shadow: none !important;
+}
+
+.kit-create-t2 #step-5 .flex.justify-between.mt-8 {
+    position: sticky;
+    bottom: 0;
+    z-index: 20;
+    background: #fff;
+    padding: 14px 0;
+    margin-top: 16px;
+    border-top: 1px solid #d4d4d8;
+}
+
+.kit-create-t2 #next-step-3 {
+    min-height: 48px;
+    font-size: 16px;
+}

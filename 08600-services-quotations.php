@@ -3,7 +3,7 @@
 /**
  * Plugin Name: 08600 Services and Quotations
  * Description: Plugin to manage services and quotations.
-  * Version: 3.1.0
+ * Version: 3.2.0
  * Author: Thando Hlophe kayise it
  * Author URI: https://kayiseit.com
  * Text Domain: 08600-services-quotations
@@ -26,7 +26,9 @@ if (version_compare(PHP_VERSION, '8.1.0', '>=')) {
 
     // Start output buffering to catch any warnings (skip REST API - would corrupt JSON)
     $is_rest_request = isset($_SERVER['REQUEST_URI']) && strpos($_SERVER['REQUEST_URI'], 'wp-json') !== false;
-    if (!headers_sent() && !$is_rest_request) {
+    $is_admin_post = isset($_SERVER['SCRIPT_NAME']) && basename((string) $_SERVER['SCRIPT_NAME']) === 'admin-post.php';
+    $is_admin_ajax = isset($_SERVER['SCRIPT_NAME']) && basename((string) $_SERVER['SCRIPT_NAME']) === 'admin-ajax.php';
+    if (!headers_sent() && !$is_rest_request && !$is_admin_post && !$is_admin_ajax) {
         ob_start(function($buffer) {
             if ($buffer === null || $buffer === '') {
                 return $buffer;
@@ -75,19 +77,30 @@ function customStyling()
     // Only load CSS on our plugin's admin pages to avoid conflicts
     $is_routes_page = in_array($page, ['route-management', 'route-create'], true);
     $is_customer_page = in_array($page, ['edit-customer', '08600-add-customer'], true);
+    // Hidden slugs (parent null) do not get an 08600_* screen id — still plugin pages.
+    $hidden_plugin_pages = array(
+        'view-deliveries',
+        '08600-Waybill-view',
+        'route-create',
+        '08600-google-sheets-test',
+    );
+    $is_hidden_plugin_page = in_array($page, $hidden_plugin_pages, true);
     // Pages that should use the modern dashboard layout (and need dashboard.css)
     $dashboard_like_pages = array(
         '08600-dashboard',
         '08600-waybill-manage',
         'warehouse-waybills',
         'kit-deliveries',
+        '08600-trip-create',
         '08600-customers',
+        '08600-booking-requests',
+        '08600-customer-portal-accounts',
     );
     $is_dashboard = in_array($page, $dashboard_like_pages, true);
-    $is_plugin_page = ($screen && $screen->id && strpos($screen->id, '08600') !== false) || $is_routes_page || $is_customer_page || $is_dashboard;
+    $is_plugin_page = ($screen && $screen->id && strpos($screen->id, '08600') !== false) || $is_routes_page || $is_customer_page || $is_dashboard || $is_hidden_plugin_page;
     if ($is_plugin_page) {
         wp_enqueue_style('autsincss', plugin_dir_url(__FILE__) . 'assets/css/austin.css', array(), '1.0');
-        wp_enqueue_style('kit-tailwindcss', plugin_dir_url(__FILE__) . 'assets/css/frontend.css', array(), '1.0');
+        wp_enqueue_style('kit-tailwindcss', plugin_dir_url(__FILE__) . 'assets/css/frontend.css', array(), '1.1');
         wp_add_inline_style('autsincss', 'body.courier-finance-plugin #wpbody-content { padding-bottom: 50px; }');
         // Fix footer overflow/overlap only on Settings (Setup Seed) page
         if ($page === '08600-settings') {
@@ -97,20 +110,13 @@ function customStyling()
             );
         }
         if ($is_dashboard) {
-            wp_enqueue_style('kit-dashboard-css', plugin_dir_url(__FILE__) . 'assets/css/dashboard.css', array('kit-tailwindcss'), '1.0');
+            wp_enqueue_style('kit-dashboard-css', plugin_dir_url(__FILE__) . 'assets/css/dashboard.css', array('kit-tailwindcss'), '1.13');
             wp_enqueue_style('leaflet-css', 'https://unpkg.com/leaflet@1.9.4/dist/leaflet.css', array(), '1.9.4');
             wp_enqueue_script('leaflet-js', 'https://unpkg.com/leaflet@1.9.4/dist/leaflet.js', array(), '1.9.4', true);
-            wp_enqueue_script('kit-dashboard-map', plugin_dir_url(__FILE__) . 'assets/js/dashboard-map.js', array('jquery', 'leaflet-js'), '1.0', true);
-            global $wpdb;
-            $default_map_address = 'Unit 1, Kya North Park, 28 Bernie St, Kya Sands, Randburg, 2188';
-            $map_center_address = '';
-            if ($wpdb && isset($wpdb->prefix)) {
-                $table = $wpdb->prefix . 'kit_company_details';
-                if ($wpdb->get_var("SHOW TABLES LIKE '" . esc_sql($table) . "'") === $table) {
-                    $map_center_address = (string) $wpdb->get_var('SELECT company_address FROM ' . $wpdb->prefix . 'kit_company_details LIMIT 1');
-                }
-            }
-            $map_center_address = trim($map_center_address) !== '' ? trim($map_center_address) : $default_map_address;
+            wp_enqueue_script('kit-dashboard-map', plugin_dir_url(__FILE__) . 'assets/js/dashboard-map.js', array('jquery', 'leaflet-js'), '1.1', true);
+            $map_center_address = class_exists('KIT_Company')
+                ? (string) (KIT_Company::get_details_array()['company_address'] ?? KIT_Company::COMPANY_ADDRESS)
+                : 'Unit 1, Kya North Park, 28 Bernie St, Kya Sands, Randburg, 2188';
             /* Fallback coords for Kya Sands, Randburg when Nominatim fails */
             $map_fallback_lat = -26.0789;
             $map_fallback_lng = 28.0123;
@@ -147,8 +153,73 @@ require_once plugin_dir_path(__FILE__) . 'includes/class-database.php';
 include_once(plugin_dir_path(__FILE__) . 'includes/class-plugin.php');
 require_once plugin_dir_path(__FILE__) . 'includes/class-server-connection.php';
 require_once plugin_dir_path(__FILE__) . 'includes/class-unified-table.php';
+require_once plugin_dir_path(__FILE__) . 'includes/class-kit-bulk-action-log.php';
 require_once plugin_dir_path(__FILE__) . 'includes/class-google-sheets.php';
 require_once plugin_dir_path(__FILE__) . 'includes/class-google-sheets-sync.php';
+
+// New sync pipeline (Step 4 of the sheet → DB refactor). Independent of the
+// legacy class-google-sheets-sync.php / run_google_sheet_seed pipeline — runs
+// in shadow mode by default so it can be compared side-by-side before cutover.
+// Canonical separator-aware parser for numbers read out of Google Sheets. The
+// API returns FORMATTED values, so money cells arrive as display text
+// ("R 1 200,50") — must load before anything that parses sheet rows.
+require_once plugin_dir_path(__FILE__) . 'includes/sync/kit-seed-number-parse.php';
+// charge_basis helpers, shared so cron and admin agree on the billed freight total.
+require_once plugin_dir_path(__FILE__) . 'includes/sync/kit-charge-basis.php';
+// Business-name detection, shared so cron/CLI seeds promote companies too.
+require_once plugin_dir_path(__FILE__) . 'includes/sync/kit-business-name.php';
+require_once plugin_dir_path(__FILE__) . 'includes/sync/class-kit-sync-run-log.php';
+require_once plugin_dir_path(__FILE__) . 'includes/sync/kit-sheet-delivery-resolve.php';
+require_once plugin_dir_path(__FILE__) . 'includes/sync/kit-seed-date-helpers.php';
+require_once plugin_dir_path(__FILE__) . 'includes/sync/kit-seed-user-resolve.php';
+require_once plugin_dir_path(__FILE__) . 'includes/sync/kit-seed-waybill-items.php';
+require_once plugin_dir_path(__FILE__) . 'includes/routes/routes-functions.php';
+require_once plugin_dir_path(__FILE__) . 'includes/sync/class-kit-driver-seeder.php';
+require_once plugin_dir_path(__FILE__) . 'includes/sync/class-kit-delivery-seeder.php';
+require_once plugin_dir_path(__FILE__) . 'includes/sync/class-kit-waybill-seeder.php';
+// Verification gate — a seed is not "successful" until every sheet waybill has
+// been read back out of wp_kit_waybills and confirmed field-for-field.
+// Must load after the seeder: it reuses the seeder's mapping + equality rules.
+// Companies own a sheet tab and a table of their own; import it before
+// customers and waybills so party resolution reads real company ids instead of
+// inventing them. Must load before KIT_Customer_Seeder, which delegates to it.
+require_once plugin_dir_path(__FILE__) . 'includes/sync/class-kit-company-seeder.php';
+require_once plugin_dir_path(__FILE__) . 'includes/sync/class-kit-customer-seeder.php';
+require_once plugin_dir_path(__FILE__) . 'includes/sync/class-kit-seed-pipeline.php';
+require_once plugin_dir_path(__FILE__) . 'includes/sync/class-kit-waybill-preflight.php';
+require_once plugin_dir_path(__FILE__) . 'includes/sync/class-kit-waybill-verifier.php';
+// kit_parcels sheet bridge retired — line items seed via kit-seed-waybill-items.php → wp_kit_waybill_items
+if (file_exists(plugin_dir_path(__FILE__) . 'includes/sync/class-kit-parcel-seeder.php')) {
+    require_once plugin_dir_path(__FILE__) . 'includes/sync/class-kit-parcel-seeder.php';
+}
+require_once plugin_dir_path(__FILE__) . 'includes/admin-pages/sync-runs.php';
+
+add_action('init', function () {
+    // Schema migrations used to run only on activation, so a widening applied
+    // after install never reached an existing site (total_volume stayed
+    // DECIMAL(10,2) and kept rounding 0.08649 to 0.09). Re-run them whenever the
+    // plugin version changes.
+    $installed = get_option('kit_schema_version');
+    $current   = defined('COURIER_FINANCE_PLUGIN_VERSION') ? COURIER_FINANCE_PLUGIN_VERSION : '3.2.0';
+    if ($installed !== $current && class_exists('Database')) {
+        if (method_exists('Database', 'ensure_waybill_volume_precision')) {
+            Database::ensure_waybill_volume_precision();
+        }
+        update_option('kit_schema_version', $current, false);
+    }
+    if (class_exists('KIT_Sync_Run_Log')) {
+        KIT_Sync_Run_Log::ensure_tables();
+    }
+    if (class_exists('KIT_Waybill_Seeder')) {
+        KIT_Waybill_Seeder::register_cron();
+    }
+});
+
+register_deactivation_hook(__FILE__, function () {
+    if (class_exists('KIT_Waybill_Seeder')) {
+        KIT_Waybill_Seeder::unregister_cron();
+    }
+});
 // Initialize GitHub-based updates if available
 require_once plugin_dir_path(__FILE__) . 'includes/update-checker.php';
 
@@ -156,13 +227,18 @@ require_once plugin_dir_path(__FILE__) . 'includes/update-checker.php';
 require_once plugin_dir_path(__FILE__) . 'includes/commons.php';
 require_once plugin_dir_path(__FILE__) . 'includes/user-roles.php';
 require_once plugin_dir_path(__FILE__) . 'includes/customers/customers-functions.php';
+require_once plugin_dir_path(__FILE__) . 'includes/customers/company-customers-functions.php';
 require_once plugin_dir_path(__FILE__) . 'includes/deliveries/deliveries-functions.php';
+require_once plugin_dir_path(__FILE__) . 'includes/warehouse/warehouse-functions.php';
 require_once plugin_dir_path(__FILE__) . 'includes/waybill/waybill-functions.php';
 require_once plugin_dir_path(__FILE__) . 'includes/admin-pages.php';
 require_once plugin_dir_path(__FILE__) . 'includes/dashboard/dashboard-functions.php';
 require_once plugin_dir_path(__FILE__) . 'includes/admin-menu.php';
 require_once plugin_dir_path(__FILE__) . 'includes/waybillmultiform.php';
 require_once plugin_dir_path(__FILE__) . 'includes/frontend/employee-portal.php';
+require_once plugin_dir_path(__FILE__) . 'includes/class-kit-booking-requests.php';
+require_once plugin_dir_path(__FILE__) . 'includes/frontend/customer-portal-init.php';
+require_once plugin_dir_path(__FILE__) . 'includes/api/class-kit-rest-api.php';
 
 /**
  * Whether plugin maintenance mode is enabled (Settings → Setup Seed).
@@ -190,7 +266,10 @@ function kit_is_courier_plugin_admin_screen() {
         '08600-waybill-manage',
         'warehouse-waybills',
         'kit-deliveries',
+        '08600-trip-create',
         '08600-customers',
+        '08600-booking-requests',
+        '08600-customer-portal-accounts',
     );
     $is_dashboard = in_array($page, $dashboard_like_pages, true);
     return ($screen->id && strpos($screen->id, '08600') !== false) || $is_routes_page || $is_customer_page || $is_dashboard;
@@ -252,12 +331,16 @@ add_action('init', function() {
     }
     if (class_exists('Database')) {
         Database::drop_legacy_foreign_keys();
+        Database::create_company_customers_table();
+        Database::ensure_customer_company_id_column();
+        Database::ensure_waybill_company_id_column();
+        Database::maybe_repair_waybill_vat_flags();
+        Database::maybe_migrate_company_customers();
+        Database::drop_customer_company_name_column();
+        Database::maybe_backfill_waybill_company_ids();
     }
     if (class_exists('KIT_Waybills')) {
         KIT_Waybills::init();
-    }
-    if (class_exists('KIT_Customers')) {
-        KIT_Customers::init();
     }
     if (class_exists('KIT_Deliveries')) {
         KIT_Deliveries::init();
@@ -302,6 +385,7 @@ register_activation_hook(__FILE__, function() {
 
         // Create employee portal pages (login + dashboard)
         kit_create_employee_portal_pages();
+        kit_create_customer_portal_pages();
     } catch (Exception $e) {
         // Log error but don't break activation
         error_log('Plugin activation error: ' . $e->getMessage());
@@ -369,8 +453,86 @@ function kit_create_employee_portal_pages() {
 }
 add_action('init', function() {
     kit_create_employee_portal_pages();
+    kit_create_customer_portal_pages();
     kit_employee_portal_migrate_dashboard_shortcode();
 }, 99);
+
+/**
+ * Create hierarchical customer portal pages: /customer/login/, /customer/dashboard/.
+ */
+function kit_create_customer_portal_pages()
+{
+    $option_key = 'kit_customer_portal_pages_created';
+    $touched = false;
+
+    $parent = get_page_by_path('customer', OBJECT, 'page');
+    if (!$parent || $parent->post_status !== 'publish') {
+        $parent_id = wp_insert_post(array(
+            'post_title'   => 'Customer portal',
+            'post_name'    => 'customer',
+            'post_content' => '',
+            'post_status'  => 'publish',
+            'post_type'    => 'page',
+            'post_author'  => 1,
+        ));
+        if (is_wp_error($parent_id)) {
+            return;
+        }
+        $parent_id = (int) $parent_id;
+        $touched = true;
+    } else {
+        $parent_id = (int) $parent->ID;
+    }
+
+    $login = get_page_by_path('customer/login', OBJECT, 'page');
+    if (!$login || $login->post_status !== 'publish') {
+        wp_insert_post(array(
+            'post_title'   => 'Customer Login',
+            'post_name'    => 'login',
+            'post_parent'  => $parent_id,
+            'post_content' => '[kit_customer_login]',
+            'post_status'  => 'publish',
+            'post_type'    => 'page',
+            'post_author'  => 1,
+        ));
+        $touched = true;
+    }
+
+    $dash = get_page_by_path('customer/dashboard', OBJECT, 'page');
+    if (!$dash || $dash->post_status !== 'publish') {
+        wp_insert_post(array(
+            'post_title'   => 'Customer Dashboard',
+            'post_name'    => 'dashboard',
+            'post_parent'  => $parent_id,
+            'post_content' => '[kit_customer_portal]',
+            'post_status'  => 'publish',
+            'post_type'    => 'page',
+            'post_author'  => 1,
+        ));
+        $touched = true;
+    }
+
+    $register = get_page_by_path('customer/register', OBJECT, 'page');
+    if (!$register || $register->post_status !== 'publish') {
+        wp_insert_post(array(
+            'post_title'   => 'Customer Register',
+            'post_name'    => 'register',
+            'post_parent'  => $parent_id,
+            'post_content' => '[kit_customer_register]',
+            'post_status'  => 'publish',
+            'post_type'    => 'page',
+            'post_author'  => 1,
+        ));
+        $touched = true;
+    }
+
+    if ($touched) {
+        flush_rewrite_rules(false);
+    }
+    if (get_option($option_key) !== 'yes') {
+        update_option($option_key, 'yes');
+    }
+}
 
 /**
  * One-time migration: ensure Employee Dashboard page uses [kit_employee_portal] so ?section= works.
@@ -410,7 +572,10 @@ add_action('load-options-permalink.php', function() {
     if (!$login) {
         $login = get_page_by_path('employee-login', OBJECT, 'page');
     }
-    if ($dashboard || $login) {
+    $customer_login = get_page_by_path('customer/login', OBJECT, 'page');
+    $customer_dash = get_page_by_path('customer/dashboard', OBJECT, 'page');
+    $customer_register = get_page_by_path('customer/register', OBJECT, 'page');
+    if ($dashboard || $login || $customer_login || $customer_dash || $customer_register) {
         flush_rewrite_rules(true);
     }
 });
@@ -560,6 +725,7 @@ include_once(plugin_dir_path(__FILE__) . 'includes/services/services-functions.p
 // Quotations functions include removed
 require_once plugin_dir_path(__FILE__) . 'includes/waybill/waybill-functions.php';
 require_once plugin_dir_path(__FILE__) . 'includes/customers/customers-functions.php';
+require_once plugin_dir_path(__FILE__) . 'includes/customers/company-customers-functions.php';
 require_once plugin_dir_path(__FILE__) . 'includes/user-roles.php';
 require_once plugin_dir_path(__FILE__) . 'includes/deliveries/deliveries-functions.php';
 require_once plugin_dir_path(__FILE__) . 'includes/waybillmultiform.php';
@@ -567,24 +733,31 @@ require_once plugin_dir_path(__FILE__) . 'includes/countries/opc-functions.php';
 require_once plugin_dir_path(__FILE__) . 'includes/routes/routes-functions.php';
 require_once plugin_dir_path(__FILE__) . 'includes/components/quickActions.php';
 
-// AJAX handler for international price migration
+// Hardening hooks must be registered on load, before any login or XML-RPC request is handled.
+require_once plugin_dir_path(__FILE__) . 'includes/security/class-kit-security.php';
+KIT_Security::init();
+
+// Maintenance endpoints below are administrator-only: schema migrations and outbound
+// connection tests must never be reachable by logged-out requests.
 add_action('wp_ajax_migrate_international_price', 'migrate_international_price_callback');
-add_action('wp_ajax_nopriv_migrate_international_price', 'migrate_international_price_callback');
-
-// AJAX handler to run full DB migration (add missing tables/columns via dbDelta)
 add_action('wp_ajax_kit_migrate_schema', 'kit_migrate_schema_callback');
-add_action('wp_ajax_nopriv_kit_migrate_schema', 'kit_migrate_schema_callback');
-
-// AJAX handler for server connection testing
 add_action('wp_ajax_test_server_connection', 'test_server_connection_callback');
-add_action('wp_ajax_nopriv_test_server_connection', 'test_server_connection_callback');
+
+/**
+ * Shared guard for the maintenance endpoints above.
+ */
+function kit_require_admin_maintenance_request(string $nonce_action): void {
+    if (!wp_verify_nonce($_POST['nonce'] ?? '', $nonce_action)) {
+        wp_send_json_error(['message' => 'Security check failed'], 403);
+    }
+
+    if (!current_user_can('manage_options')) {
+        wp_send_json_error(['message' => 'Insufficient permissions'], 403);
+    }
+}
 
 function migrate_international_price_callback() {
-    // Verify nonce
-    if (!wp_verify_nonce($_POST['nonce'], 'migrate_international_price')) {
-        wp_send_json_error(['message' => 'Security check failed']);
-        return;
-    }
+    kit_require_admin_maintenance_request('migrate_international_price');
     
     try {
         // Include the database class
@@ -600,11 +773,7 @@ function migrate_international_price_callback() {
 }
 
 function kit_migrate_schema_callback() {
-    // Verify nonce
-    if (!wp_verify_nonce($_POST['nonce'] ?? '', 'kit_migrate_schema')) {
-        wp_send_json_error(['message' => 'Security check failed']);
-        return;
-    }
+    kit_require_admin_maintenance_request('kit_migrate_schema');
 
     try {
         require_once plugin_dir_path(__FILE__) . 'includes/class-database.php';
@@ -619,11 +788,7 @@ function kit_migrate_schema_callback() {
 }
 
 function test_server_connection_callback() {
-    // Verify nonce
-    if (!wp_verify_nonce($_POST['nonce'], 'test_server_connection')) {
-        wp_send_json_error(['message' => 'Security check failed']);
-        return;
-    }
+    kit_require_admin_maintenance_request('test_server_connection');
     
     try {
         // Include the server connection class
@@ -668,17 +833,27 @@ function test_server_connection_callback() {
 function my_plugin_enqueue_scripts()
 {
     // Only load heavy plugin scripts/localized city map on this plugin's admin pages.
+    if (php_sapi_name() === 'cli' || !function_exists('get_current_screen')) {
+        return;
+    }
     $page = isset($_GET['page']) ? sanitize_text_field($_GET['page']) : '';
-    $is_plugin_page =
-        strpos($page, '08600') === 0 ||
-        in_array($page, ['route-management', 'route-create', 'edit-customer', 'warehouse-waybills', 'kit-deliveries'], true);
+    $screen = get_current_screen();
+    $is_routes_page = in_array($page, ['route-management', 'route-create'], true);
+    $is_customer_page = in_array($page, ['edit-customer', '08600-add-customer'], true);
+    // Match customStyling(): any submenu under 08600-dashboard (e.g. manage-drivers) uses screen id "08600-…".
+    $is_plugin_page = ($screen && $screen->id && strpos($screen->id, '08600') !== false)
+        || strpos($page, '08600') === 0
+        || $is_routes_page
+        || $is_customer_page
+        || in_array($page, ['warehouse-waybills', 'kit-deliveries', 'manage-drivers'], true);
 
     if (!$is_plugin_page) {
         return;
     }
 
-    wp_enqueue_script('kitscript', plugin_dir_url(__FILE__) . 'js/kitscript.js', ['jquery'], null, true);
-    wp_enqueue_script('waybill-pagination', plugin_dir_url(__FILE__) . '/js/waybill-pagination.js', ['jquery'], null, true);
+    wp_enqueue_script('components', plugin_dir_url(__FILE__) . 'js/components.js', ['jquery'], '1.1.2', true);
+    wp_enqueue_script('kitscript', plugin_dir_url(__FILE__) . 'js/kitscript.js', ['jquery', 'components'], '1.0.8', true);
+    wp_enqueue_script('waybill-pagination', plugin_dir_url(__FILE__) . '/js/waybill-pagination.js', ['jquery', 'components'], null, true);
 
     // Preload cities map for instant city dropdown updates without AJAX
     if (!class_exists('KIT_Deliveries')) {
@@ -688,6 +863,7 @@ function my_plugin_enqueue_scripts()
 
     $localize_data = [
         'ajax_url' => admin_url('admin-ajax.php'),
+        'admin_url' => admin_url(),
         'countryCities' => $country_cities_map,
         'nonces' => [
             'add'    => wp_create_nonce('add_waybill_nonce'),
@@ -697,6 +873,8 @@ function my_plugin_enqueue_scripts()
             'get_cities_nonce'   => wp_create_nonce('get_cities_nonce'),
             'kit_waybill_nonce'  => wp_create_nonce('kit_waybill_nonce'),
             'pdf_nonce'          => wp_create_nonce('pdf_nonce'),
+            'email_waybill_pdf'  => wp_create_nonce('email_waybill_pdf'),
+            'wp_debug'           => defined('WP_DEBUG') && WP_DEBUG,
         ],
     ];
 

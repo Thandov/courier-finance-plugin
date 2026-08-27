@@ -22,6 +22,12 @@ module.exports = {
     /^p[trblxy]?-/,
     /^m[trblxy]?-/,
     /^space-[xy]-/,
+    // gap-x-*/gap-y-* were absent from the safelist, so they only survived when the
+    // content scan happened to catch them. Templates rendered with zero spacing.
+    /^gap-/,
+    /^gap-[xy]-/,
+    /^md:gap-/,
+    /^lg:gap-/,
     // Explicit padding classes for icon inputs
     'pl-12',
     'pr-4',
@@ -49,6 +55,7 @@ module.exports = {
     /^focus:ring/,
     // States
     /^disabled:/,
+    /^peer-checked:/,
   ],
   theme: {
     extend: {},

@@ -52,9 +52,12 @@ if (isset($_POST['assign_waybills']) && wp_verify_nonce($_POST['nonce'], 'assign
 // Get warehouse waybills (waybills with warehouse status)
 global $wpdb;
 $warehouse_waybills_query = "
-    SELECT DISTINCT w.*, c.name as customer_name, c.surname as customer_surname, c.company_name
+    SELECT DISTINCT w.*, c.name as customer_name, c.surname as customer_surname,
+           COALESCE(NULLIF(co.company_name, ''), NULLIF(cust_co.company_name, '')) as company_name
     FROM {$wpdb->prefix}kit_waybills w
     LEFT JOIN {$wpdb->prefix}kit_customers c ON w.customer_id = c.cust_id
+    LEFT JOIN {$wpdb->prefix}kit_company_customers co ON w.company_id = co.company_id
+    LEFT JOIN {$wpdb->prefix}kit_company_customers cust_co ON c.company_id = cust_co.company_id
     WHERE w.warehouse IS NOT NULL AND w.warehouse != ''
     ORDER BY w.created_at DESC
 ";

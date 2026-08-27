@@ -1,0 +1,55 @@
+/**
+ * Customer portal — scoped layout on top of the active theme.
+ * Plugin tables may still use utility classes from frontend.css when enqueued.
+ */
+.kit-customer-portal-wrap {
+  max-width: 1200px;
+  margin-left: auto;
+  margin-right: auto;
+  padding: 1rem 1.25rem 2.5rem;
+}
+
+.kit-customer-portal-login .kit-employee-login-wrap {
+  max-width: 420px;
+}
+
+.kit-customer-portal-header {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.75rem;
+  margin-bottom: 1.25rem;
+}
+
+.kit-customer-portal-header h1 {
+  margin: 0;
+  font-size: clamp(1.25rem, 2.5vw, 1.75rem);
+  font-weight: 600;
+}
+
+.kit-customer-portal-guest {
+  text-align: center;
+  padding: 2rem 1rem;
+  border: 1px solid #e5e7eb;
+  border-radius: 12px;
+  background: #fafafa;
+}
+
+.kit-booking-form select,
+.kit-booking-form input.input,
+.kit-booking-form textarea.input {
+  width: 100%;
+  margin-top: 0.25rem;
+}
+
+.kit-booking-form label {
+  display: block;
+  font-size: 0.875rem;
+  font-weight: 500;
+  color: #374151;
+}
+
+.kit-booking-list {
+  max-width: 1200px;
+}

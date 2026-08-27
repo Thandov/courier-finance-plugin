@@ -28,156 +28,593 @@ function hello() {
     window.CUSTOMERS_DATA = Object.assign({}, existingData, customersFromLocalized);
 })();
 
-function fetchRatePerKg() {
-    // ✅ BULLETPROOF: Comprehensive input validation and sanitization
-    try {
-        var rawMass = jQuery('#total_mass_kg').val() || '';
-        var total_mass_kg = parseFloat(rawMass) || 0;
-        var direction_id = jQuery('#direction_id').val() || '';
-        var origin_country_id = jQuery('#countrydestination_id').val() || '';
-        var current_rate = jQuery('#current_rate').val() || '';
+/** First non-empty direction_id on the waybill form (ignores duplicate empty hidden fields). */
+window.kitResolveDirectionId = function kitResolveDirectionId() {
+    var form = document.getElementById('multi-step-waybill-form');
+    if (form) {
+        var fields = form.querySelectorAll('input[name="direction_id"]');
+        for (var i = 0; i < fields.length; i++) {
+            var v = String(fields[i].value || '').trim();
+            var n = parseInt(v, 10);
+            if (v !== '' && !Number.isNaN(n) && n > 0) {
+                return String(n);
+            }
+        }
+    }
+    var fallback = jQuery('#direction_id').val();
+    if (fallback && String(fallback).trim() !== '') {
+        var n2 = parseInt(String(fallback).trim(), 10);
+        if (!Number.isNaN(n2) && n2 > 0) {
+            return String(n2);
+        }
+    }
+    return '';
+};
 
-        // ✅ BULLETPROOF: Comprehensive validation
+/**
+ * Prefill Create Waybill from a customer's last waybill template.
+ * Skips mass and parcel line items.
+ */
+window.kitApplyLastWaybillTemplate = function kitApplyLastWaybillTemplate(template) {
+    if (!template || typeof template !== 'object') {
+        return;
+    }
+
+    function setVal(id, value) {
+        var el = document.getElementById(id);
+        if (!el || value === undefined || value === null) return;
+        el.value = String(value);
+        try { el.dispatchEvent(new Event('input', { bubbles: true })); } catch (e) {}
+        try { el.dispatchEvent(new Event('change', { bubbles: true })); } catch (e) {}
+    }
+
+    function setChargeFlag(inputId, buttonId, on) {
+        var input = document.getElementById(inputId);
+        var btn = document.getElementById(buttonId);
+        var want = !!on;
+        if (input) {
+            var current = String(input.value || '0') === '1';
+            if (current !== want && btn) {
+                try { btn.click(); } catch (e) {}
+            } else {
+                input.value = want ? '1' : '0';
+            }
+        } else if (btn && btn.type === 'checkbox') {
+            if (btn.checked !== want) {
+                btn.checked = want;
+                try { btn.dispatchEvent(new Event('change', { bubbles: true })); } catch (e) {}
+            }
+        }
+    }
+
+    function showNotice(message, isError) {
+        var host = document.getElementById('kit-last-waybill-prefill-notice');
+        if (!host) {
+            var badge = document.getElementById('selected-customer-badge');
+            host = document.createElement('div');
+            host.id = 'kit-last-waybill-prefill-notice';
+            if (badge && badge.parentNode) {
+                badge.parentNode.insertBefore(host, badge.nextSibling);
+            } else {
+                var form = document.getElementById('multi-step-waybill-form');
+                if (form) form.insertBefore(host, form.firstChild);
+            }
+        }
+        host.className = isError
+            ? 'mb-4 rounded border border-amber-200 bg-amber-50 px-3 py-2 text-sm text-amber-900'
+            : 'mb-4 rounded border border-slate-200 bg-slate-50 px-3 py-2 text-sm text-slate-700';
+        host.textContent = message || '';
+        host.style.display = message ? 'block' : 'none';
+    }
+
+    // Description
+    setVal('waybill_description', template.description || '');
+
+    // Document flags (SADC / SAD500 / VAT)
+    setChargeFlag('include_sadc_input', 'sadc_certificate', template.include_sadc);
+    setChargeFlag('include_sad500_input', 'include_sad500', template.include_sad500);
+    setChargeFlag('vat_include_input', 'vat_include', template.vat_include);
+
+    // Origin — prefer last waybill snapshot over customer defaults.
+    if (template.origin_country_id) {
+        var originCountry = document.getElementById('origin_country_select') || document.getElementById('origin_country');
+        if (originCountry) {
+            originCountry.value = String(template.origin_country_id);
+            try { originCountry.dispatchEvent(new Event('change', { bubbles: true })); } catch (e) {}
+        }
+        if (typeof window.kitLoadCitiesForCountry === 'function') {
+            window.kitLoadCitiesForCountry(template.origin_country_id, 'origin', template.origin_city_id || null);
+        } else {
+            setTimeout(function () {
+                if (template.origin_city_id) {
+                    setVal('origin_city_select', template.origin_city_id);
+                }
+            }, 350);
+        }
+    }
+
+    // Mode: warehouse vs truck
+    var warehouseBtn = document.getElementById('kit-step4-mode-warehouse');
+    var truckBtn = document.getElementById('kit-step4-mode-truck');
+    if (template.warehouse) {
+        if (warehouseBtn) {
+            try { warehouseBtn.click(); } catch (e) {}
+        } else {
+            var pending = document.getElementById('pending_option');
+            if (pending) {
+                pending.checked = true;
+                try { pending.dispatchEvent(new Event('change', { bubbles: true })); } catch (e) {}
+            }
+        }
+    } else if (truckBtn) {
+        try { truckBtn.click(); } catch (e) {}
+    }
+
+    // Destination country/city + direction
+    function applyDestination() {
+        var destCountry = document.getElementById('stepDestinationSelect') || document.getElementById('destination_country');
+        if (destCountry && template.destination_country_id) {
+            destCountry.value = String(template.destination_country_id);
+            // Prefer explicit city loader with target city id — avoid racing a bare change handler.
+            if (typeof window.loadDestinationCities === 'function') {
+                window.loadDestinationCities(template.destination_country_id, template.destination_city_id || null);
+            } else {
+                try { destCountry.dispatchEvent(new Event('change', { bubbles: true })); } catch (e) {}
+                setTimeout(function () {
+                    setVal('destination_city', template.destination_city_id || '');
+                }, 400);
+            }
+            // Re-assert city after any async city-list render.
+            if (template.destination_city_id) {
+                setTimeout(function () {
+                    setVal('destination_city', template.destination_city_id);
+                }, 500);
+            }
+        } else if (template.destination_city_id) {
+            setVal('destination_city', template.destination_city_id);
+        }
+
+        if (template.direction_id) {
+            var dirFields = document.querySelectorAll('#multi-step-waybill-form input[name="direction_id"], #direction_id');
+            dirFields.forEach(function (field) {
+                field.value = String(template.direction_id);
+                try { field.dispatchEvent(new Event('change', { bubbles: true })); } catch (e) {}
+                try { field.dispatchEvent(new Event('input', { bubbles: true })); } catch (e) {}
+            });
+        }
+
+        if (!template.warehouse && template.delivery_id) {
+            setVal('selected_delivery_id', template.delivery_id);
+            var card = document.querySelector('.delivery-card[data-delivery-id="' + template.delivery_id + '"]');
+            if (card && typeof window.selectDeliveryCard === 'function') {
+                var dir = card.getAttribute('data-direction-id') || template.direction_id;
+                try { window.selectDeliveryCard(card, dir, true); } catch (e) {}
+            }
+        }
+    }
+    setTimeout(applyDestination, 250);
+
+    // Charge basis
+    var basis = String(template.charge_basis || 'auto').toLowerCase();
+    if (basis === 'weight') basis = 'mass';
+    var basisRadio = document.querySelector('input[name="charge_basis"][value="' + basis + '"]');
+    if (basisRadio) {
+        basisRadio.checked = true;
+        try { basisRadio.dispatchEvent(new Event('change', { bubbles: true })); } catch (e) {}
+    }
+
+    // Volume dims / charge — leave mass empty
+    setVal('total_mass_kg', '');
+    setVal('mass_rate', '');
+    setVal('mass_charge', '0.00');
+    setVal('base_rate', '');
+    setVal('current_rate', '');
+
+    if (template.item_length > 0) setVal('item_length', template.item_length);
+    if (template.item_width > 0) setVal('item_width', template.item_width);
+    if (template.item_height > 0) setVal('item_height', template.item_height);
+
+    if (template.total_volume > 0) {
+        setVal('total_volume', Number(template.total_volume).toFixed(6));
+    }
+    if (template.volume_rate_used > 0) {
+        setVal('volume_rate_per_m3', Number(template.volume_rate_used).toFixed(2));
+    }
+    if (template.volume_charge > 0) {
+        setVal('volume_charge', Number(template.volume_charge).toFixed(2));
+    }
+
+    if (template.use_custom_volume_rate && template.custom_volume_rate_per_m3 > 0) {
+        var customCb = document.getElementById('enable_volume_price_manipulator') || document.querySelector('input[name="use_custom_volume_rate"]');
+        if (customCb) {
+            customCb.checked = true;
+            try { customCb.dispatchEvent(new Event('change', { bubbles: true })); } catch (e) {}
+        }
+        setVal('custom_volume_rate_per_m3', template.custom_volume_rate_per_m3);
+    }
+
+    // Misc items (not parcels)
+    if (Array.isArray(template.misc_items) && template.misc_items.length) {
+        setTimeout(function () {
+            var addBtn = document.getElementById('add-misc-item-0');
+            var container = document.getElementById('misc-items-0');
+            if (!addBtn || !container) return;
+
+            // Clear existing misc rows first
+            container.querySelectorAll('.dynamic-item .remove-item').forEach(function (btn) {
+                try { btn.click(); } catch (e) {}
+            });
+
+            template.misc_items.forEach(function (item) {
+                try { addBtn.click(); } catch (e) {}
+                var rows = container.querySelectorAll('.dynamic-item');
+                var row = rows[rows.length - 1];
+                if (!row) return;
+                var desc = row.querySelector('input[name*="[misc_item]"]');
+                var qty = row.querySelector('input[name*="[misc_quantity]"]');
+                var price = row.querySelector('input[name*="[misc_price]"]');
+                if (desc) {
+                    desc.value = item.misc_item || '';
+                    try { desc.dispatchEvent(new Event('input', { bubbles: true })); } catch (e) {}
+                }
+                if (qty) {
+                    qty.value = String(item.misc_quantity || 1);
+                    try { qty.dispatchEvent(new Event('input', { bubbles: true })); } catch (e) {}
+                }
+                if (price) {
+                    price.value = String(item.misc_price != null ? item.misc_price : 0);
+                    try { price.dispatchEvent(new Event('input', { bubbles: true })); } catch (e) {}
+                }
+            });
+        }, 500);
+    }
+
+    if (typeof window.kitUpdateBilledFreightDisplay === 'function') {
+        setTimeout(window.kitUpdateBilledFreightDisplay, 600);
+    }
+    if (typeof window.kitChargesReadyToContinue === 'function') {
+        setTimeout(window.kitChargesReadyToContinue, 700);
+    }
+    if (typeof window.kitUpdateWaybillReview === 'function') {
+        setTimeout(window.kitUpdateWaybillReview, 800);
+    }
+    if (typeof window.kitClearOrphanRateLoaders === 'function') {
+        setTimeout(window.kitClearOrphanRateLoaders, 900);
+    }
+
+    var wbNo = template.source_waybill_no || template.source_waybill_id || '';
+    showNotice(
+        wbNo
+            ? ('Prefilling from waybill #' + wbNo + '. Mass and parcel items were left blank.')
+            : 'Prefilling from this customer’s last waybill. Mass and parcel items were left blank.'
+    );
+};
+
+window.kitPrefillFromCustomerLastWaybill = function kitPrefillFromCustomerLastWaybill(customerId) {
+    var custId = parseInt(customerId, 10) || 0;
+    if (custId <= 0) return;
+    if (typeof myPluginAjax === 'undefined' || !myPluginAjax.ajax_url) return;
+
+    var nonce = (myPluginAjax.nonces && myPluginAjax.nonces.get_waybills_nonce) || myPluginAjax.nonce || '';
+    var body = new URLSearchParams({
+        action: 'kit_get_customer_last_waybill_template',
+        customer_id: String(custId),
+        nonce: nonce
+    });
+
+    fetch(myPluginAjax.ajax_url, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/x-www-form-urlencoded; charset=UTF-8' },
+        body: body.toString()
+    })
+        .then(function (r) { return r.json(); })
+        .then(function (payload) {
+            if (payload && payload.success && payload.data) {
+                window.kitApplyLastWaybillTemplate(payload.data);
+            } else {
+                var host = document.getElementById('kit-last-waybill-prefill-notice');
+                if (!host) {
+                    var badge = document.getElementById('selected-customer-badge');
+                    host = document.createElement('div');
+                    host.id = 'kit-last-waybill-prefill-notice';
+                    if (badge && badge.parentNode) {
+                        badge.parentNode.insertBefore(host, badge.nextSibling);
+                    }
+                }
+                if (host) {
+                    host.className = 'mb-4 rounded border border-slate-200 bg-slate-50 px-3 py-2 text-sm text-slate-600';
+                    host.textContent = (payload && payload.data && payload.data.message)
+                        ? payload.data.message
+                        : 'No previous waybill found to prefill for this customer.';
+                    host.style.display = 'block';
+                }
+            }
+        })
+        .catch(function () {
+            // Silent fail — customer selection still works without prefill.
+        });
+};
+
+/** Re-fetch mass rate when direction_id becomes available after mass was entered. */
+window.kitRefreshMassRatesIfNeeded = function kitRefreshMassRatesIfNeeded() {
+    if (typeof window.kitResolveDirectionId !== 'function' || typeof fetchRatePerKg !== 'function') {
+        return;
+    }
+    if (!window.kitResolveDirectionId()) {
+        return;
+    }
+    function parseNumber(value) {
+        if (!value || value === '') return 0;
+        var normalized = value.toString().replace(',', '.');
+        var parsed = parseFloat(normalized);
+        return Number.isFinite(parsed) ? parsed : 0;
+    }
+    document.querySelectorAll('.kit-mass-component').forEach(function(scope) {
+        var massInput = scope.querySelector('.kit-total-mass') || scope.querySelector('#total_mass_kg');
+        var rateInput = scope.querySelector('.kit-mass-rate') || scope.querySelector('#mass_rate');
+        if (!massInput || !rateInput) {
+            return;
+        }
+        var mass = parseNumber(massInput.value);
+        var rate = parseNumber(rateInput.value);
+        if (mass > 0 && rate <= 0) {
+            fetchRatePerKg(scope);
+        }
+    });
+};
+
+window.kitClearOrphanRateLoaders = function kitClearOrphanRateLoaders() {
+    function parseLoose(value) {
+        var n = parseFloat(String(value || '').replace(',', '.'));
+        return Number.isFinite(n) ? n : 0;
+    }
+    try {
+        // Prefer clearing known charge fields once a numeric value is present —
+        // stuck aria-busy overlays were leaving "Calculating…" over valid rates.
+        var knownIds = ['mass_rate', 'mass_charge', 'volume_rate_per_m3', 'volume_charge', 'volume_rate'];
+        knownIds.forEach(function (id) {
+            var el = document.getElementById(id);
+            if (!el || !el.classList.contains('kit-input-loading')) return;
+            if (parseLoose(el.value) > 0 && window.ComponentUtils && typeof window.ComponentUtils.hideInputLoader === 'function') {
+                window.ComponentUtils.hideInputLoader(el);
+            }
+        });
+        document.querySelectorAll('.kit-input-loading').forEach(function (el) {
+            if (parseLoose(el.value) > 0 && window.ComponentUtils && typeof window.ComponentUtils.hideInputLoader === 'function') {
+                window.ComponentUtils.hideInputLoader(el);
+            }
+        });
+        document.querySelectorAll('.kit-total-mass.loading, #total_mass_kg.loading').forEach(function (el) {
+            el.classList.remove('loading');
+        });
+    } catch (e) {}
+};
+
+function fetchRatePerKg(scopeEl) {
+    try {
+        var $scope = scopeEl ? jQuery(scopeEl) : jQuery(document);
+        var rawMass = ($scope.find('.kit-total-mass').val() || $scope.find('#total_mass_kg').val() || '');
+        var total_mass_kg = parseFloat(String(rawMass).replace(',', '.')) || 0;
+        var direction_id = window.kitResolveDirectionId ? window.kitResolveDirectionId() : ($scope.find('#direction_id').val() || jQuery('#direction_id').val() || '');
+        var origin_country_id = ($scope.find('#countrydestination_id').val() || jQuery('#countrydestination_id').val() || '');
+
         if (rawMass !== '' && (isNaN(total_mass_kg) || total_mass_kg <= 0)) {
-            console.warn('Invalid mass value for rate fetch:', rawMass);
             showRateFetchError('Invalid mass value. Please enter a positive number.');
             return;
         }
-        
         if (total_mass_kg > 10000) {
-            console.warn('Mass exceeds maximum limit:', total_mass_kg);
             showRateFetchError('Mass exceeds maximum limit of 10,000 kg.');
             return;
         }
-        
         if (!direction_id) {
-            console.warn('Missing direction_id for rate fetch');
             showRateFetchError('Missing direction information. Please refresh the page.');
             return;
         }
-        
         if (!origin_country_id) {
-            console.warn('Missing origin_country_id for rate fetch');
             showRateFetchError('Missing origin country information. Please refresh the page.');
             return;
         }
+        if (!(total_mass_kg > 0 && direction_id && origin_country_id)) {
+            return;
+        }
 
-        // ✅ BULLETPROOF: Show loading indicator
-        var massInput = document.getElementById('total_mass_kg');
+        var massInput = ($scope.find('.kit-total-mass').get(0) || document.getElementById('total_mass_kg'));
+        var massRateEl = ($scope.find('.kit-mass-rate').get(0) || document.getElementById('mass_rate'));
+        var massChargeEl = ($scope.find('.kit-mass-charge').get(0) || document.getElementById('mass_charge'));
+
+        function clearMassLoaders() {
+            if (massInput) {
+                massInput.classList.remove('loading');
+            }
+            try {
+                if (window.ComponentUtils && typeof window.ComponentUtils.hideInputLoader === 'function') {
+                    if (massRateEl) window.ComponentUtils.hideInputLoader(massRateEl);
+                    if (massChargeEl) window.ComponentUtils.hideInputLoader(massChargeEl);
+                }
+            } catch (e) {}
+        }
+
+        var savedCharge = parseFloat(String($scope.find('.kit-mass-charge').val() || jQuery('#mass_charge').val() || '').replace(',', '.')) || 0;
+        var existingRate = parseFloat(String($scope.find('.kit-mass-rate').val() || jQuery('#mass_rate').val() || '').replace(',', '.')) || 0;
+        if (existingRate > 0) {
+            clearMassLoaders();
+            if (typeof window.kitUpdateBilledFreightDisplay === 'function') {
+                window.kitUpdateBilledFreightDisplay();
+            }
+            if (typeof window.kitChargesReadyToContinue === 'function') {
+                window.kitChargesReadyToContinue();
+            }
+            return;
+        }
+        if (savedCharge > 0 && total_mass_kg > 0) {
+            var derivedRate = savedCharge / total_mass_kg;
+            var $massChargeTargets = ($scope.find('.kit-mass-charge').length ? $scope.find('.kit-mass-charge') : jQuery('#mass_charge'));
+            var $massRateTargets = ($scope.find('.kit-mass-rate').length ? $scope.find('.kit-mass-rate') : jQuery('#mass_rate'));
+            var $baseRateTargets = ($scope.find('#base_rate').length ? $scope.find('#base_rate') : jQuery('#base_rate'));
+            var $currentRateTargets = ($scope.find('#current_rate').length ? $scope.find('#current_rate') : jQuery('#current_rate'));
+            $massRateTargets.val(derivedRate.toFixed(2));
+            $baseRateTargets.val(derivedRate.toFixed(2));
+            $currentRateTargets.val(derivedRate.toFixed(2));
+            $massChargeTargets.val(savedCharge.toFixed(2));
+            clearMassLoaders();
+            try { $massRateTargets.trigger('change'); } catch (e) {}
+            try { $massChargeTargets.trigger('change'); } catch (e) {}
+            try {
+                if (typeof window.kitUpdateWaybillHeaderTotal === 'function') {
+                    window.kitUpdateWaybillHeaderTotal();
+                }
+            } catch (e) {}
+            if (typeof window.kitUpdateBilledFreightDisplay === 'function') {
+                window.kitUpdateBilledFreightDisplay();
+            }
+            if (typeof window.kitChargesReadyToContinue === 'function') {
+                window.kitChargesReadyToContinue();
+            }
+            return;
+        }
+
+        // Abort any in-flight mass rate request for this scope.
+        if (fetchRatePerKg._xhr && typeof fetchRatePerKg._xhr.abort === 'function') {
+            try { fetchRatePerKg._xhr.abort(); } catch (e) {}
+        }
+        fetchRatePerKg._seq = (fetchRatePerKg._seq || 0) + 1;
+        var requestSeq = fetchRatePerKg._seq;
+
         if (massInput) {
             massInput.classList.add('loading');
         }
+        try {
+            if (window.ComponentUtils && typeof window.ComponentUtils.showInputLoader === 'function') {
+                if (massRateEl) window.ComponentUtils.showInputLoader(massRateEl, 'Calculating rate…');
+                if (massChargeEl) window.ComponentUtils.showInputLoader(massChargeEl, 'Calculating charge…');
+            }
+        } catch (e) {}
 
-        if (total_mass_kg > 0 && direction_id && origin_country_id) {
-            jQuery.ajax({
-                url: myPluginAjax.ajax_url,
-                type: 'POST',
-                dataType: 'json',
-                timeout: 10000, // ✅ BULLETPROOF: 10 second timeout
-                data: {
-                    action: 'handle_get_price_per_kg',
-                    total_mass_kg: total_mass_kg,
-                    direction_id: direction_id,
-                    origin_country_id: origin_country_id, // ✅ BULLETPROOF: Include origin_country_id
-                    nonce: myPluginAjax.nonces.get_waybills_nonce
-                },
-                success: function (response) {
-                    // ✅ BULLETPROOF: Hide loading indicator
-                    if (massInput) {
-                        massInput.classList.remove('loading');
-                    }
-                    
-                    if (response && response.success && response.data) {
-                        var rate = parseFloat(response.data.rate_per_kg);
-                        var total_charge = parseFloat(response.data.total_charge);
-                        
-                        // ✅ BULLETPROOF: Validate response data
-                        if (!Number.isFinite(rate) || rate <= 0) {
-                            console.error('Invalid rate received:', response.data.rate_per_kg);
-                            showRateFetchError('Invalid rate received from server.');
-                            return;
-                        }
-                        
-                        if (!Number.isFinite(total_charge) || total_charge <= 0) {
-                            console.error('Invalid total charge received:', response.data.total_charge);
-                            showRateFetchError('Invalid charge calculation received from server.');
-                            return;
-                        }
+        if (typeof window.kitChargesReadyToContinue === 'function') {
+            window.kitChargesReadyToContinue();
+        }
 
-                        console.log('Rate per kg: R' + rate);
-                        current_rate = rate;
+        var safetyTimer = setTimeout(function () {
+            if (requestSeq !== fetchRatePerKg._seq) return;
+            clearMassLoaders();
+            if (typeof window.kitChargesReadyToContinue === 'function') {
+                window.kitChargesReadyToContinue();
+            }
+        }, 12000);
 
-                        // ✅ BULLETPROOF: Update all relevant fields
+        fetchRatePerKg._xhr = jQuery.ajax({
+            url: myPluginAjax.ajax_url,
+            type: 'POST',
+            dataType: 'json',
+            timeout: 10000,
+            data: {
+                action: 'handle_get_price_per_kg',
+                total_mass_kg: total_mass_kg,
+                direction_id: direction_id,
+                origin_country_id: origin_country_id,
+                nonce: myPluginAjax.nonces.get_waybills_nonce
+            },
+            success: function (response) {
+                if (requestSeq !== fetchRatePerKg._seq) return;
+
+                if (response && response.success && response.data) {
+                    var rate = parseFloat(response.data.rate_per_kg);
+                    var total_charge = parseFloat(response.data.total_charge);
+
+                    if (!Number.isFinite(rate) || rate <= 0) {
+                        showRateFetchError('Invalid rate received from server.');
+                    } else if (!Number.isFinite(total_charge) || total_charge <= 0) {
+                        showRateFetchError('Invalid charge calculation received from server.');
+                    } else {
+                        var $massChargeTargets = ($scope.find('.kit-mass-charge').length ? $scope.find('.kit-mass-charge') : jQuery('#mass_charge'));
+                        var $massRateTargets = ($scope.find('.kit-mass-rate').length ? $scope.find('.kit-mass-rate') : jQuery('#mass_rate'));
+                        var $baseRateTargets = ($scope.find('#base_rate').length ? $scope.find('#base_rate') : jQuery('#base_rate'));
+                        var $currentRateTargets = ($scope.find('#current_rate').length ? $scope.find('#current_rate') : jQuery('#current_rate'));
+                        $massChargeTargets.val(total_charge.toFixed(2));
+                        $massRateTargets.val(rate.toFixed(2));
+                        $baseRateTargets.val(rate.toFixed(2));
+                        $currentRateTargets.val(rate.toFixed(2));
+                        $massChargeTargets.attr('data-base-charge', total_charge.toFixed(2));
                         jQuery('#mass_charge_display').text(rate);
-                        jQuery('#mass_charge').val(total_charge.toFixed(2));
-                        jQuery('#mass_rate').val(rate.toFixed(2));
-                        jQuery('#base_rate').val(rate.toFixed(2));
-                        jQuery('#current_rate').val(rate.toFixed(2));
-                        jQuery('#mass_charge').attr('data-base-charge', total_charge.toFixed(2));
-                        
-                        // ✅ BULLETPROOF: Clear any previous errors
+                        try { $massRateTargets.trigger('change'); } catch (e) {}
+                        try { $massChargeTargets.trigger('change'); } catch (e) {}
+                        try {
+                            if (typeof window.kitUpdateWaybillHeaderTotal === 'function') {
+                                window.kitUpdateWaybillHeaderTotal();
+                            }
+                        } catch (e) {}
                         jQuery('#rate-fetch-error').remove();
-                        
-                        // ✅ BULLETPROOF: Trigger recalculation if manipulator is active
                         if (typeof calculateMassCharge === 'function') {
                             calculateMassCharge();
                         }
-                        
-                    } else {
-                        console.error('Rate fetch failed:', response);
-                        var errorMsg = (response && response.data && response.data.message) 
-                            ? response.data.message 
-                            : 'Unable to fetch rate from server.';
-                        showRateFetchError(errorMsg);
                     }
-                },
-                error: function (xhr, status, error) {
-                    // ✅ BULLETPROOF: Hide loading indicator
-                    if (massInput) {
-                        massInput.classList.remove('loading');
-                    }
-                    
-                    console.error('AJAX Error:', {xhr, status, error});
-                    
-                    var errorMessage = 'Network error. Please check your connection and try again.';
-                    
-                    if (status === 'timeout') {
-                        errorMessage = 'Request timed out. Please try again.';
-                    } else if (xhr.status === 0) {
-                        errorMessage = 'Network connection lost. Please check your internet connection.';
-                    } else if (xhr.status >= 500) {
-                        errorMessage = 'Server error. Please try again later.';
-                    } else if (xhr.status === 403) {
-                        errorMessage = 'Access denied. Please refresh the page and try again.';
-                    }
-                    
-                    showRateFetchError(errorMessage);
+                } else {
+                    var errorMsg = (response && response.data && response.data.message)
+                        ? response.data.message
+                        : 'Unable to fetch rate from server.';
+                    showRateFetchError(errorMsg);
                 }
-            });
-        }
-        
+
+                if (typeof window.kitUpdateBilledFreightDisplay === 'function') {
+                    window.kitUpdateBilledFreightDisplay();
+                }
+            },
+            error: function (xhr, status) {
+                if (requestSeq !== fetchRatePerKg._seq) return;
+                if (status === 'abort') return;
+
+                var errorMessage = 'Network error. Please check your connection and try again.';
+                if (status === 'timeout') {
+                    errorMessage = 'Request timed out. Please try again.';
+                } else if (xhr && xhr.status === 0) {
+                    errorMessage = 'Network connection lost. Please check your internet connection.';
+                } else if (xhr && xhr.status >= 500) {
+                    errorMessage = 'Server error. Please try again later.';
+                } else if (xhr && xhr.status === 403) {
+                    errorMessage = 'Access denied. Please refresh the page and try again.';
+                }
+                showRateFetchError(errorMessage);
+            },
+            complete: function () {
+                if (requestSeq !== fetchRatePerKg._seq) return;
+                clearTimeout(safetyTimer);
+                clearMassLoaders();
+                if (typeof window.kitChargesReadyToContinue === 'function') {
+                    window.kitChargesReadyToContinue();
+                }
+            }
+        });
     } catch (error) {
-        // ✅ BULLETPROOF: Hide loading indicator
-        var massInput = document.getElementById('total_mass_kg');
-        if (massInput) {
-            massInput.classList.remove('loading');
-        }
-        
         console.error('Rate fetch function error:', error);
+        if (typeof window.kitClearOrphanRateLoaders === 'function') {
+            window.kitClearOrphanRateLoaders();
+        }
         showRateFetchError('An unexpected error occurred. Please try again.');
+        if (typeof window.kitChargesReadyToContinue === 'function') {
+            window.kitChargesReadyToContinue();
+        }
     }
 }
 
 document.addEventListener('DOMContentLoaded', function () {
-    var massInput = document.getElementById('total_mass_kg');
-    if (massInput) {
-        massInput.addEventListener('click', fetchRatePerKg);
-    }
+    // Bind per component instance (supports multiple waybill sections)
+    jQuery(document).on('click', '.kit-total-mass, #total_mass_kg', function () {
+        var scope = jQuery(this).closest('.kit-mass-component').get(0);
+        fetchRatePerKg(scope);
+    });
 
     var timeout;
-    jQuery('#total_mass_kg').on('input', function () {
+    jQuery(document).on('input', '.kit-total-mass, #total_mass_kg', function () {
         clearTimeout(timeout);
-        timeout = setTimeout(fetchRatePerKg, 500); // Wait 500ms after user stops typing
+        var scope = jQuery(this).closest('.kit-mass-component').get(0);
+        timeout = setTimeout(function () { fetchRatePerKg(scope); }, 500); // Wait 500ms after user stops typing
+    });
+
+    // When direction_id is set (delivery / warehouse / country), refresh mass rates if mass was already entered.
+    jQuery(document).on('change input', '#multi-step-waybill-form input[name="direction_id"]', function () {
+        if (typeof window.kitRefreshMassRatesIfNeeded === 'function') {
+            window.kitRefreshMassRatesIfNeeded();
+        }
     });
     
     // ✅ BULLETPROOF: Auto-trigger rate fetch on page load if mass is present but rate is missing
@@ -192,28 +629,8 @@ document.addEventListener('DOMContentLoaded', function () {
         }
         
         setTimeout(function() {
-            var massValue = parseNumber(jQuery('#total_mass_kg').val());
-            var rateValue = parseNumber(jQuery('#mass_rate').val());
-            var directionId = jQuery('#direction_id').val();
-            var originCountryId = jQuery('#countrydestination_id').val();
-            
-            
-            if (massValue > 0 && rateValue <= 0 && directionId) {
-                fetchRatePerKg();
-            } else if (massValue > 0 && rateValue <= 0 && !directionId) {
-                console.warn('kitscript.js: Cannot auto-trigger - direction_id missing');
-                // Try to find direction_id from form (check both inputs)
-                var formDirectionId = jQuery('#direction_id').val() || jQuery('input[name="direction_id"]').val();
-                if (formDirectionId) {
-                    // Update the #direction_id field if it's empty
-                    if (!jQuery('#direction_id').val()) {
-                        jQuery('#direction_id').val(formDirectionId);
-                    }
-                    directionId = formDirectionId;
-                    fetchRatePerKg();
-                } else {
-                    console.warn('direction_id not found in form');
-                }
+            if (typeof window.kitRefreshMassRatesIfNeeded === 'function') {
+                window.kitRefreshMassRatesIfNeeded();
             }
         }, 1000); // 1 second delay to ensure all elements are loaded
     });
@@ -405,18 +822,22 @@ document.addEventListener('DOMContentLoaded', function () {
         }
     }
 
-    // Warehoused checkbox
-    jQuery(document).on('change', '#pending_option', function () {
-        var scheduledDeliveriesList = document.getElementById('scheduled-deliveries-list');
-        var nextBtn = document.getElementById('step4NextBtn');
-        var destinationCountry = document.getElementById('stepDestinationSelect');
-        var destinationCity = document.getElementById('destination_city');
-        var destinationCountryHelp = document.getElementById('destination-country-help');
-        var destinationCityHelp = document.getElementById('destination-city-help');
+    // Warehoused checkbox (waybill Step 4 only — Edit Delivery modal reuses same ids; scope to form)
+    jQuery(document).on('change', '#multi-step-waybill-form #pending_option', function () {
+        var form = document.getElementById('multi-step-waybill-form');
+        if (!form) return;
+        var scheduledDeliveriesList = form.querySelector('#scheduled-deliveries-list') || document.getElementById('scheduled-deliveries-list');
+        var destinationCountryHelp = form.querySelector('#destination-country-help');
+        var destinationCityHelp = form.querySelector('#destination-city-help');
         
         if (jQuery(this).is(':checked')) {
-            // Hide scheduled deliveries when pending is checked
-            scheduledDeliveriesList.classList.add('hidden');
+            // Hide truck / scheduled deliveries when warehouse (pending) is checked
+            var truckPanel = form.querySelector('#kit-step4-truck-panel');
+            if (truckPanel) {
+                truckPanel.classList.add('hidden');
+            } else if (scheduledDeliveriesList) {
+                scheduledDeliveriesList.classList.add('hidden');
+            }
             
             // Enable the next button for pending items
             setStep4NextState(true);
@@ -429,8 +850,13 @@ document.addEventListener('DOMContentLoaded', function () {
             if (destinationCityHelp) destinationCityHelp.style.display = 'none';
             
         } else {
-            // Show scheduled deliveries when pending is unchecked
-            scheduledDeliveriesList.classList.remove('hidden');
+            // Show truck panel or scheduled list when switching to delivery / truck mode
+            var truckPanelShow = form.querySelector('#kit-step4-truck-panel');
+            if (truckPanelShow) {
+                truckPanelShow.classList.remove('hidden');
+            } else if (scheduledDeliveriesList) {
+                scheduledDeliveriesList.classList.remove('hidden');
+            }
             
             // Show helper text for destination fields
             if (destinationCountryHelp) destinationCountryHelp.style.display = 'block';
@@ -441,24 +867,25 @@ document.addEventListener('DOMContentLoaded', function () {
         }
     });
     
-    // Destination country change handler
-    jQuery(document).on('change', '#stepDestinationSelect', function () {
+    // Destination country change handler (waybill form only)
+    jQuery(document).on('change', '#multi-step-waybill-form #stepDestinationSelect', function () {
         validateDestinationSelection();
     });
     
-    // Destination city change handler
-    jQuery(document).on('change', '#destination_city', function () {
+    // Destination city change handler (waybill form only)
+    jQuery(document).on('change', '#multi-step-waybill-form #destination_city', function () {
         validateDestinationSelection();
     });
     
-    // Function to validate destination selection
+    // Function to validate destination selection (waybill Step 4 only)
     function validateDestinationSelection() {
-        var pendingCheckbox = document.getElementById('pending_option');
-        var nextBtn = document.getElementById('step4NextBtn');
-        var destinationCountry = document.getElementById('stepDestinationSelect');
-        var destinationCity = document.getElementById('destination_city');
-        var destinationCountryHelp = document.getElementById('destination-country-help');
-        var destinationCityHelp = document.getElementById('destination-city-help');
+        var form = document.getElementById('multi-step-waybill-form');
+        if (!form) return;
+        var pendingCheckbox = form.querySelector('#pending_option');
+        var destinationCountry = form.querySelector('#stepDestinationSelect');
+        var destinationCity = form.querySelector('#destination_city');
+        var destinationCountryHelp = form.querySelector('#destination-country-help');
+        var destinationCityHelp = form.querySelector('#destination-city-help');
         
         // If pending is checked, no validation needed
         if (pendingCheckbox && pendingCheckbox.checked) {
@@ -498,15 +925,16 @@ document.addEventListener('DOMContentLoaded', function () {
         setStep4NextState(countrySelected && citySelected);
     }
     
-    // Initialize validation on page load
+    // Initialize validation on page load (waybill form only)
     document.addEventListener('DOMContentLoaded', function() {
-        // Run initial validation
+        var form = document.getElementById('multi-step-waybill-form');
+        if (!form) return;
         validateDestinationSelection();
         
         // Set initial state for helper text visibility
-        var pendingCheckbox = document.getElementById('pending_option');
-        var destinationCountryHelp = document.getElementById('destination-country-help');
-        var destinationCityHelp = document.getElementById('destination-city-help');
+        var pendingCheckbox = form.querySelector('#pending_option');
+        var destinationCountryHelp = form.querySelector('#destination-country-help');
+        var destinationCityHelp = form.querySelector('#destination-city-help');
         
         if (pendingCheckbox && pendingCheckbox.checked) {
             if (destinationCountryHelp) destinationCountryHelp.style.display = 'none';
@@ -1262,6 +1690,36 @@ document.addEventListener('DOMContentLoaded', function() {
 
 // ✅ ADD ERROR HANDLING FUNCTION
 function showRateFetchError(message) {
+    // Prefer the global .displayHere strip when present (Mass component)
+    try {
+        var displayHere = document.getElementById('mass-display-here');
+        if (displayHere) {
+            var base = 'display-here text-sm mt-2 p-2 border rounded';
+            // Match KIT_Commons::displayHere() skins
+            var skin = 'text-red-700 bg-red-50 border-red-200';
+            displayHere.className = base + ' ' + skin;
+            displayHere.textContent = message || '';
+            if (!message) {
+                displayHere.setAttribute('hidden', 'hidden');
+                return;
+            }
+            displayHere.removeAttribute('hidden');
+
+            // Auto-hide after 5 seconds (same behavior as legacy rate-fetch-error)
+            var hideAt = Date.now() + 5000;
+            displayHere.dataset.hideAt = String(hideAt);
+            setTimeout(function () {
+                if (displayHere.dataset.hideAt === String(hideAt)) {
+                    displayHere.textContent = '';
+                    displayHere.setAttribute('hidden', 'hidden');
+                }
+            }, 5000);
+            return;
+        }
+    } catch (e) {
+        // Fall back to legacy inline error div
+    }
+
     var errorDiv = jQuery('#rate-fetch-error');
     if (errorDiv.length === 0) {
         errorDiv = jQuery('<div id="rate-fetch-error" class="text-red-600 text-sm mt-2"></div>');
@@ -1295,18 +1753,34 @@ function initBulkManagement(tableId, bulkNonce) {
     const bulkActionsBar = document.getElementById('bulk-actions-bar-' + tableId);
     const bulkSelectedCount = document.getElementById('bulk-selected-count-' + tableId);
     const bulkClearBtn = document.getElementById('bulk-clear-selection-' + tableId);
+    const bulkActionOk = document.getElementById('bulk-action-ok-' + tableId);
+    const tableToolbar = document.getElementById('kit-table-toolbar-' + tableId);
 
     // Function to get checkboxes (will be called dynamically)
     const getBulkRowCheckboxes = function() {
         return table.querySelectorAll('.bulk-row-checkbox');
     };
 
-    // Function to get bulk action buttons (data-bulk-action and fallback by id prefix so Export/Delete etc. are always found)
+    const bulkActionSelect = document.getElementById('bulk-action-select-' + tableId);
+
+    // Function to get bulk action buttons (legacy) and the action select
     const getBulkActionButtons = function() {
         if (!bulkActionsBar) return [];
         const byDataAttr = bulkActionsBar.querySelectorAll('[data-bulk-action]');
         if (byDataAttr.length > 0) return byDataAttr;
         return bulkActionsBar.querySelectorAll('button[id^="bulk-delete-"], button[id^="bulk-export-"], button[id^="bulk-packing-"], button[id^="bulk-active-"], button[id^="bulk-inactive-"]');
+    };
+
+    const getSelectedRowIds = function() {
+        const bulkRowCheckboxes = getBulkRowCheckboxes();
+        return Array.from(bulkRowCheckboxes).filter(function(cb) {
+            const row = cb.closest('tr');
+            return cb.checked && row && row.style.display !== 'none' && !row.dataset.groupRow;
+        }).map(function(cb) {
+            return cb.value;
+        }).filter(function(id) {
+            return id;
+        });
     };
 
     // Debug: Log if elements are found
@@ -1334,6 +1808,13 @@ function initBulkManagement(tableId, bulkNonce) {
         });
         const count = checkedBoxes.length;
 
+        visibleCheckboxes.forEach(function(cb) {
+            const row = cb.closest('tr');
+            if (row) {
+                row.classList.toggle('kit-row-selected', !!cb.checked);
+            }
+        });
+
         console.log('updateBulkUI called - count:', count, 'bulkActionsBar:', bulkActionsBar, 'checkboxes found:', bulkRowCheckboxes.length);
 
         // Update count
@@ -1341,26 +1822,21 @@ function initBulkManagement(tableId, bulkNonce) {
             bulkSelectedCount.textContent = count + ' selected';
         }
 
-        // Show/hide bulk actions bar
+        if (tableToolbar) {
+            tableToolbar.classList.toggle('is-selecting', count > 0);
+        }
         if (bulkActionsBar) {
             if (count > 0) {
-                console.log('Showing bulk actions bar');
-                bulkActionsBar.style.display = 'block';
-                bulkActionsBar.style.visibility = 'visible';
+                bulkActionsBar.hidden = false;
+                bulkActionsBar.style.display = '';
                 bulkActionsBar.classList.remove('hidden');
             } else {
-                console.log('Hiding bulk actions bar');
-                bulkActionsBar.style.display = 'none';
-                bulkActionsBar.style.visibility = 'hidden';
+                bulkActionsBar.hidden = true;
                 bulkActionsBar.classList.add('hidden');
             }
-        } else {
-            console.error('bulkActionsBar element not found!');
         }
 
-        // Enable/disable bulk action buttons when any row is selected
-        // Buttons are initially rendered with disabled utility classes by PHP, so
-        // we must toggle both the disabled property/attribute and those classes here.
+        // Enable/disable bulk action buttons / select when any row is selected
         bulkActionButtonsList.forEach(function(btn) {
             const shouldDisable = count === 0;
             btn.disabled = shouldDisable;
@@ -1372,6 +1848,24 @@ function initBulkManagement(tableId, bulkNonce) {
                 btn.classList.remove('opacity-50', 'cursor-not-allowed', 'pointer-events-none');
             }
         });
+        if (bulkActionSelect) {
+            bulkActionSelect.disabled = count === 0;
+            if (count === 0) {
+                bulkActionSelect.value = '';
+                bulkActionSelect.setAttribute('disabled', 'disabled');
+            } else {
+                bulkActionSelect.removeAttribute('disabled');
+            }
+        }
+        if (bulkActionOk) {
+            const canConfirm = count > 0 && bulkActionSelect && bulkActionSelect.value !== '';
+            bulkActionOk.disabled = !canConfirm;
+            if (canConfirm) {
+                bulkActionOk.removeAttribute('disabled');
+            } else {
+                bulkActionOk.setAttribute('disabled', 'disabled');
+            }
+        }
 
         // Update select all checkbox state
         if (bulkSelectAll && visibleCheckboxes.length > 0) {
@@ -1414,37 +1908,9 @@ function initBulkManagement(tableId, bulkNonce) {
             }
         });
 
-        // Make the entire checkbox cell clickable, not just the input.
-        table.addEventListener('click', function(e) {
-            const checkboxCell = e.target && e.target.closest ? e.target.closest('td.bulk-checkbox-cell') : null;
-            if (!checkboxCell || !table.contains(checkboxCell)) {
-                return;
-            }
-
-            // Let normal checkbox clicks behave naturally.
-            if (e.target && e.target.classList && e.target.classList.contains('bulk-row-checkbox')) {
-                return;
-            }
-
-            // Do not toggle when clicking interactive elements inside the cell.
-            const interactiveTarget = e.target && e.target.closest ? e.target.closest('a, button, input, select, textarea, label') : null;
-            if (interactiveTarget) {
-                return;
-            }
-
-            const checkbox = checkboxCell.querySelector('.bulk-row-checkbox');
-            if (!checkbox || checkbox.disabled) {
-                return;
-            }
-
-            checkbox.checked = !checkbox.checked;
-            checkbox.dispatchEvent(new Event('change', { bubbles: true }));
-        });
-
         // Also handle direct checkbox click events in case change doesn't fire
         table.addEventListener('click', function(e) {
             if (e.target && e.target.classList.contains('bulk-row-checkbox')) {
-                console.log('Row checkbox clicked:', e.target.checked, e.target.value);
                 // Small delay to let the checkbox state update
                 setTimeout(function() {
                     updateBulkUI();
@@ -1468,50 +1934,79 @@ function initBulkManagement(tableId, bulkNonce) {
         });
     }
 
-    // Bulk action buttons - use event delegation
+    const runSelectedBulkAction = function(action) {
+        if (!action) {
+            return;
+        }
+        const selectedIds = getSelectedRowIds();
+        if (selectedIds.length === 0) {
+            alert('Please select at least one item.');
+            return;
+        }
+        handleBulkAction(action, selectedIds, bulkNonce);
+        window.dispatchEvent(new CustomEvent('kit-bulk-action', {
+            detail: { action: action, selectedIds: selectedIds, tableId: tableId }
+        }));
+    };
+
+    if (bulkActionSelect) {
+        bulkActionSelect.addEventListener('change', function() {
+            updateBulkUI();
+        });
+    }
+    if (bulkActionOk) {
+        bulkActionOk.addEventListener('click', function() {
+            if (this.disabled || !bulkActionSelect) {
+                return;
+            }
+            const action = bulkActionSelect.value;
+            if (!action) {
+                alert('Choose an action first.');
+                return;
+            }
+            runSelectedBulkAction(action);
+        });
+    }
+
+    // Legacy bulk action buttons - use event delegation
     if (bulkActionsBar) {
         bulkActionsBar.addEventListener('click', function(e) {
             const btn = e.target.closest('[data-bulk-action]');
             if (!btn || btn.disabled) return;
-
-            const action = btn.dataset.bulkAction;
-            const bulkRowCheckboxes = getBulkRowCheckboxes();
-            const checkedBoxes = Array.from(bulkRowCheckboxes).filter(function(cb) {
-                const row = cb.closest('tr');
-                return cb.checked && row && row.style.display !== 'none' && !row.dataset.groupRow;
-            });
-            const selectedIds = checkedBoxes.map(function(cb) {
-                return cb.value;
-            }).filter(function(id) {
-                return id;
-            });
-
-            if (selectedIds.length === 0) {
-                alert('Please select at least one item.');
-                return;
-            }
-
-            // Use default handler (custom handlers can be added via window events)
-            handleBulkAction(action, selectedIds, bulkNonce);
-
-            // Dispatch custom event for external handlers
-            const event = new CustomEvent('kit-bulk-action', {
-                detail: { action: action, selectedIds: selectedIds, tableId: tableId }
-            });
-            window.dispatchEvent(event);
+            runSelectedBulkAction(btn.dataset.bulkAction);
         });
     }
 
     // Default bulk action handler
+    function appendConfirmedBy(form) {
+        const confirmed = document.createElement('input');
+        confirmed.type = 'hidden';
+        confirmed.name = 'bulk_confirmed';
+        confirmed.value = '1';
+        form.appendChild(confirmed);
+    }
+
+    function logBulkConfirmation(action, selectedIds, nonce) {
+        if (typeof myPluginAjax === 'undefined' || !myPluginAjax.ajax_url) {
+            return;
+        }
+        const body = new FormData();
+        body.append('action', 'kit_log_bulk_action');
+        body.append('nonce', nonce || '');
+        body.append('bulk_action', action);
+        body.append('bulk_ids', selectedIds.join(','));
+        body.append('entity', 'waybill');
+        fetch(myPluginAjax.ajax_url, { method: 'POST', body: body, credentials: 'same-origin' });
+    }
+
     function handleBulkAction(action, selectedIds, nonce) {
         const ids = selectedIds.join(',');
 
         switch(action) {
             case 'delete':
-                if (!confirm('Are you sure you want to delete ' + selectedIds.length + ' selected item(s)? This action cannot be undone.')) {
+                if (!confirm('Delete ' + selectedIds.length + ' selected item(s)? This cannot be undone.')) {
                     return;
                 }
-                // Submit form or make AJAX call
                 const deleteForm = document.createElement('form');
                 deleteForm.method = 'POST';
                 deleteForm.action = window.location.href;
@@ -1536,12 +2031,13 @@ function initBulkManagement(tableId, bulkNonce) {
                     deleteForm.appendChild(nonceInput);
                 }
 
+                appendConfirmedBy(deleteForm);
                 document.body.appendChild(deleteForm);
                 deleteForm.submit();
                 break;
 
             case 'export':
-                // Export to PDF - preserve page parameter and add export_selected
+                logBulkConfirmation('export', selectedIds, nonce);
                 const currentUrl = new URL(window.location.href);
                 currentUrl.searchParams.set('export_selected', ids);
                 // Ensure page parameter is preserved (should be 08600-waybill-manage)
@@ -1551,7 +2047,39 @@ function initBulkManagement(tableId, bulkNonce) {
                 window.open(currentUrl.toString(), '_blank');
                 break;
 
+            case 'move_to_warehouse': {
+                const warehouseForm = document.createElement('form');
+                warehouseForm.method = 'POST';
+                warehouseForm.action = window.location.href;
+
+                const warehouseActionInput = document.createElement('input');
+                warehouseActionInput.type = 'hidden';
+                warehouseActionInput.name = 'bulk_action';
+                warehouseActionInput.value = 'move_to_warehouse';
+                warehouseForm.appendChild(warehouseActionInput);
+
+                const warehouseIdsInput = document.createElement('input');
+                warehouseIdsInput.type = 'hidden';
+                warehouseIdsInput.name = 'bulk_ids';
+                warehouseIdsInput.value = ids;
+                warehouseForm.appendChild(warehouseIdsInput);
+
+                if (nonce) {
+                    const warehouseNonceInput = document.createElement('input');
+                    warehouseNonceInput.type = 'hidden';
+                    warehouseNonceInput.name = 'bulk_nonce';
+                    warehouseNonceInput.value = nonce;
+                    warehouseForm.appendChild(warehouseNonceInput);
+                }
+
+                appendConfirmedBy(warehouseForm);
+                document.body.appendChild(warehouseForm);
+                warehouseForm.submit();
+                break;
+            }
+
             case 'packing_list': {
+                logBulkConfirmation('packing_list', selectedIds, nonce);
                 const printBase = window.kitWaybillListPrintUrl || '';
                 const printNonce = window.kitWaybillListPrintNonce || '';
                 if (!printBase || !printNonce) {
@@ -1628,65 +2156,198 @@ function initBulkManagement(tableId, bulkNonce) {
 }
 
 // ============================================================================
-// Charge Basis Update Handler (from editWaybill.php)
-// Updates invoice amount display based on charge basis selection
+// Live header Amount updater (edit waybill)
+// Mirrors KIT_Bulletproof_Calculator: primary(mass|volume|auto) + misc
+// + SAD500? + SADC? + (VAT on parcels OR international fee)
 // ============================================================================
-(function initChargeBasisUpdate() {
-    document.addEventListener('DOMContentLoaded', function() {
-        const chargeBasisRadios = document.querySelectorAll('.charge-basis-radio');
-        const waybilltotalMockup = document.getElementById('waybilltotalMockup');
-        
-        // Only run if required elements exist (edit waybill page check)
-        if (chargeBasisRadios.length === 0 || !waybilltotalMockup) return;
-        
-        const massChargeInput = document.getElementById('mass_charge');
-        const volumeChargeInput = document.getElementById('volume_charge');
-        
-        function updateInvoiceAmount() {
-            if (!waybilltotalMockup) return;
-            
-            // Get current charge basis selection
-            const selectedBasis = document.querySelector('input[name="charge_basis"]:checked')?.value || 'auto';
-            
-            // Get mass and volume charges
-            const massCharge = parseFloat(massChargeInput?.value?.replace(/,/g, '') || '0') || 0;
-            const volumeCharge = parseFloat(volumeChargeInput?.value?.replace(/,/g, '') || '0') || 0;
-            
-            let displayAmount = 0;
-            
-            if (selectedBasis === 'mass') {
-                displayAmount = massCharge;
-            } else if (selectedBasis === 'volume') {
-                displayAmount = volumeCharge;
-            } else if (selectedBasis === 'auto') {
-                // Show the highest of the two
-                displayAmount = Math.max(massCharge, volumeCharge);
-            }
-            
-            // Update the display
-            waybilltotalMockup.textContent = displayAmount.toLocaleString('en-US', {
-                minimumFractionDigits: 2,
-                maximumFractionDigits: 2
-            });
+(function initWaybillHeaderTotalLiveUpdate() {
+    function parseAmount(value) {
+        if (value === undefined || value === null) return 0;
+        const n = parseFloat(String(value).replace(/\s/g, '').replace(/,/g, '.'));
+        return Number.isFinite(n) ? n : 0;
+    }
+
+    function getChargeConfig() {
+        const fromData = (typeof EditWaybillData !== 'undefined' && EditWaybillData.charges)
+            ? EditWaybillData.charges
+            : {};
+        const host = document.querySelector('[data-kit-charge-config]');
+        const ds = host ? host.dataset : {};
+        return {
+            sad500: parseAmount(fromData.sad500 != null ? fromData.sad500 : (ds.sad500 || 350)),
+            sadc: parseAmount(fromData.sadc != null ? fromData.sadc : (ds.sadc || 1000)),
+            vatPercent: parseAmount(fromData.vat_percent != null ? fromData.vat_percent : (ds.vatPercent || 10)),
+            internationalPrice: parseAmount(
+                fromData.international_price != null
+                    ? fromData.international_price
+                    : (ds.internationalPrice || 0)
+            ),
+        };
+    }
+
+    function isFlagOn(checkboxId, hiddenInputId) {
+        const checkbox = document.getElementById(checkboxId);
+        if (checkbox && typeof checkbox.checked === 'boolean' && checkbox.type === 'checkbox') {
+            return !!checkbox.checked;
         }
-        
-        // Listen for charge basis changes
-        chargeBasisRadios.forEach(radio => {
-            radio.addEventListener('change', updateInvoiceAmount);
+        const hidden = document.getElementById(hiddenInputId);
+        if (hidden) {
+            return String(hidden.value) === '1';
+        }
+        return false;
+    }
+
+    function sumDynamicItems(containerId, priceName, qtyName) {
+        const container = document.getElementById(containerId);
+        if (!container) return 0;
+        let total = 0;
+        container.querySelectorAll('.dynamic-item').forEach(function (row) {
+            if (row.classList.contains('override-adjustment-row')) return;
+            const priceInput = row.querySelector('input[name*="[' + priceName + ']"]');
+            const qtyInput = row.querySelector('input[name*="[' + qtyName + ']"]');
+            const price = parseAmount(priceInput ? priceInput.value : 0);
+            const qty = parseAmount(qtyInput ? qtyInput.value : 0);
+            total += price * qty;
         });
-        
-        // Also listen for changes in mass/volume charges (in case they update)
-        if (massChargeInput) {
-            massChargeInput.addEventListener('input', updateInvoiceAmount);
-            massChargeInput.addEventListener('change', updateInvoiceAmount);
+        return total;
+    }
+
+    function primaryCharge(massCharge, volumeCharge, basis) {
+        if (basis === 'mass' || basis === 'weight') return massCharge;
+        if (basis === 'volume') return volumeCharge;
+        return Math.max(massCharge, volumeCharge);
+    }
+
+    function calculateLiveWaybillTotal() {
+        const config = getChargeConfig();
+        const massCharge = parseAmount(document.getElementById('mass_charge')?.value);
+        const volumeCharge = parseAmount(document.getElementById('volume_charge')?.value);
+        const selectedBasis = document.querySelector('input[name="charge_basis"]:checked')?.value || 'auto';
+        const primary = primaryCharge(massCharge, volumeCharge, selectedBasis);
+
+        const parcelsTotal = sumDynamicItems('custom-waybill-items', 'unit_price', 'quantity');
+        const miscTotal = sumDynamicItems('misc-items', 'misc_price', 'misc_quantity');
+
+        let includeVat = isFlagOn('vat_include', 'vat_include_input');
+        let includeSadc = isFlagOn('sadc_certificate', 'include_sadc_input');
+        const includeSad500 = isFlagOn('include_sad500', 'include_sad500_input');
+
+        // VAT and SADC are mutually exclusive (prefer VAT when both somehow on)
+        if (includeVat) includeSadc = false;
+
+        let total = primary + miscTotal;
+        if (includeSad500) total += config.sad500;
+        if (includeSadc) total += config.sadc;
+
+        if (includeVat) {
+            const vatRate = config.vatPercent > 1 ? (config.vatPercent / 100) : config.vatPercent;
+            total += parcelsTotal * vatRate;
+        } else {
+            total += config.internationalPrice;
         }
-        if (volumeChargeInput) {
-            volumeChargeInput.addEventListener('input', updateInvoiceAmount);
-            volumeChargeInput.addEventListener('change', updateInvoiceAmount);
+
+        return total;
+    }
+
+    function updateWaybillHeaderTotal() {
+        const waybilltotalMockup = document.getElementById('waybilltotalMockup');
+        if (!waybilltotalMockup) return;
+
+        // Respect total override UI: when override is enabled the mockup is hidden
+        const enableOverride = document.getElementById('enable_total_override');
+        if (enableOverride && enableOverride.checked) return;
+
+        const total = calculateLiveWaybillTotal();
+        waybilltotalMockup.textContent = total.toLocaleString('en-US', {
+            minimumFractionDigits: 2,
+            maximumFractionDigits: 2
+        });
+    }
+
+    window.kitUpdateWaybillHeaderTotal = updateWaybillHeaderTotal;
+    window.kitCalculateLiveWaybillTotal = calculateLiveWaybillTotal;
+
+    document.addEventListener('DOMContentLoaded', function () {
+        const waybilltotalMockup = document.getElementById('waybilltotalMockup');
+        if (!waybilltotalMockup) return;
+
+        const scheduleUpdate = (function () {
+            let raf = null;
+            return function () {
+                if (raf) cancelAnimationFrame(raf);
+                raf = requestAnimationFrame(function () {
+                    raf = null;
+                    updateWaybillHeaderTotal();
+                });
+            };
+        })();
+
+        document.querySelectorAll('.charge-basis-radio').forEach(function (radio) {
+            radio.addEventListener('change', scheduleUpdate);
+        });
+
+        ['mass_charge', 'volume_charge', 'mass_rate', 'total_mass_kg', 'total_volume', 'volume_rate'].forEach(function (id) {
+            const el = document.getElementById(id);
+            if (!el) return;
+            el.addEventListener('input', scheduleUpdate);
+            el.addEventListener('change', scheduleUpdate);
+        });
+
+        ['vat_include', 'sadc_certificate', 'include_sad500'].forEach(function (id) {
+            const el = document.getElementById(id);
+            if (!el) return;
+            el.addEventListener('change', scheduleUpdate);
+            el.addEventListener('click', scheduleUpdate);
+        });
+
+        ['vat_include_input', 'include_sadc_input', 'include_sad500_input'].forEach(function (id) {
+            const el = document.getElementById(id);
+            if (!el) return;
+            el.addEventListener('change', scheduleUpdate);
+            // Hidden inputs may be updated programmatically without events
+            try {
+                const descriptor = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value');
+                if (descriptor && descriptor.set) {
+                    Object.defineProperty(el, 'value', {
+                        configurable: true,
+                        enumerable: true,
+                        get: function () { return descriptor.get.call(this); },
+                        set: function (v) {
+                            descriptor.set.call(this, v);
+                            scheduleUpdate();
+                        }
+                    });
+                }
+            } catch (e) { /* non-fatal */ }
+        });
+
+        // Parcels + misc row edits / add / remove
+        ['custom-waybill-items', 'misc-items'].forEach(function (containerId) {
+            const container = document.getElementById(containerId);
+            if (!container) return;
+            container.addEventListener('input', scheduleUpdate);
+            container.addEventListener('change', scheduleUpdate);
+            container.addEventListener('click', function (e) {
+                if (e.target.closest('.remove-item')) scheduleUpdate();
+            });
+            try {
+                const observer = new MutationObserver(scheduleUpdate);
+                observer.observe(container, { childList: true, subtree: true });
+            } catch (e) { /* non-fatal */ }
+        });
+
+        document.addEventListener('kit:waybill-total-dirty', scheduleUpdate);
+
+        // jQuery .val() updates (mass/volume AJAX) often skip native input events
+        if (typeof jQuery !== 'undefined') {
+            jQuery(document).on(
+                'input change',
+                '#mass_charge, #volume_charge, .kit-mass-charge, .kit-volume-charge',
+                scheduleUpdate
+            );
         }
-        
-        // Initial update
-        updateInvoiceAmount();
+
+        scheduleUpdate();
     });
 })();
 
@@ -1772,7 +2433,7 @@ function initBulkManagement(tableId, bulkNonce) {
             if (baseRate > 0) {
                 if (massRateField) massRateField.value = baseRate.toFixed(2);
                 if (massBaseDisplay) massBaseDisplay.textContent = baseRate.toFixed(2);
-                if (massChargeField) massChargeField.value = (Number.isFinite(totalMass) ? totalMass : 0 * baseRate).toFixed(2);
+                if (massChargeField) massChargeField.value = ((Number.isFinite(totalMass) ? totalMass : 0) * baseRate).toFixed(2);
             }
             // Clear manipulator numeric value if present
             const manipInput = document.getElementById('mass_charge_manipulator');
@@ -2097,3 +2758,153 @@ function autoSelectRecentDelivery() {
     
     waitForCards();
 }
+
+/**
+ * View Waybill: email PDF to customer (admin AJAX + wp_mail).
+ */
+(function () {
+    if (typeof jQuery === 'undefined') {
+        return;
+    }
+    jQuery(function ($) {
+        // Matches the server-rendered notices from KIT_Commons::renderActionNotices():
+        // core notice markup, dismissed by the user rather than on a timer.
+        function kitShowWaybillActionMessage(type, html) {
+            var $root = $('#wpbody-content .wrap').first();
+            if (!$root.length) {
+                $root = $('#wpbody-content').first();
+            }
+            if (!$root.length) {
+                window.alert($('<div>').html(html).text());
+                return;
+            }
+
+            var classes = {
+                success: 'notice-success',
+                error: 'notice-error',
+                info: 'notice-info'
+            };
+
+            $root.find('.kit-action-notice.is-js').remove();
+            $('<div/>', {
+                'class': 'notice ' + (classes[type] || classes.info) + ' is-dismissible kit-action-notice is-js',
+                html: '<p>' + html + '</p>' +
+                    '<button type="button" class="notice-dismiss">' +
+                    '<span class="screen-reader-text">Dismiss this notice.</span></button>'
+            }).prependTo($root);
+        }
+
+        $(document).on('click', '.kit-action-notice.is-js .notice-dismiss', function () {
+            $(this).closest('.kit-action-notice').remove();
+        });
+
+        $(document).on('click', '.js-kit-email-waybill-pdf', function (e) {
+            e.preventDefault();
+            var $btn = $(this);
+            if ($btn.data('kitEmailSending')) {
+                return;
+            }
+            if (typeof myPluginAjax === 'undefined' || !myPluginAjax.ajax_url) {
+                kitShowWaybillActionMessage('error', '<strong>Error!</strong> Email action is not available. Refresh the page and try again.');
+                return;
+            }
+            var waybillNo = parseInt($btn.attr('data-waybill-no') || '0', 10);
+            if (!waybillNo) {
+                return;
+            }
+            var nonce = ($btn.attr('data-email-nonce') || '').trim();
+            if (!nonce && typeof myPluginAjax !== 'undefined' && myPluginAjax.nonces && myPluginAjax.nonces.email_waybill_pdf) {
+                nonce = myPluginAjax.nonces.email_waybill_pdf;
+            }
+            if (!nonce) {
+                kitShowWaybillActionMessage('error', '<strong>Error!</strong> Security token missing. Refresh the page.');
+                return;
+            }
+            $btn.data('kitEmailSending', true).prop('disabled', true).addClass('opacity-60 cursor-wait');
+            $.post(myPluginAjax.ajax_url, {
+                action: 'kit_email_waybill_pdf',
+                nonce: nonce,
+                waybill_no: waybillNo
+            })
+                .done(function (res) {
+                    if (res && res.success) {
+                        var msg = (res.data && res.data.message) ? res.data.message : 'Email sent.';
+                        kitShowWaybillActionMessage('success', '<strong>Success!</strong> ' + $('<div>').text(msg).html());
+                    } else {
+                        var err = (res && res.data && res.data.message) ? res.data.message : 'Email failed.';
+                        kitShowWaybillActionMessage('error', '<strong>Error!</strong> ' + $('<div>').text(err).html());
+                    }
+                })
+                .fail(function (xhr) {
+                    var err = 'Request failed.';
+                    if (xhr && xhr.responseJSON && xhr.responseJSON.data && xhr.responseJSON.data.message) {
+                        err = xhr.responseJSON.data.message;
+                    }
+                    kitShowWaybillActionMessage('error', '<strong>Error!</strong> ' + $('<div>').text(err).html());
+                })
+                .always(function () {
+                    $btn.data('kitEmailSending', false).prop('disabled', false).removeClass('opacity-60 cursor-wait');
+                });
+        });
+    });
+})();
+
+/**
+ * Click anywhere in a row checkbox cell to toggle that row only.
+ * Select-all header checkboxes keep native/small hit targets so a padding
+ * click does not mass-select every row ("all as 1 click").
+ */
+(function initKitCheckboxOnlyCellClicks() {
+    function isSelectAllCheckbox(checkbox) {
+        if (!checkbox) {
+            return false;
+        }
+        if (checkbox.classList.contains('bulk-select-all-checkbox')) {
+            return true;
+        }
+        var id = checkbox.id || '';
+        return id.indexOf('bulk-select-all-') === 0
+            || id.indexOf('select-all') !== -1
+            || id === 'warehouse-select-all-checkbox'
+            || id === 'infinite-select-all-checkbox';
+    }
+
+    function isCheckboxOnlyRowCell(cell) {
+        // Row cells only — never expand hit target on header select-all.
+        if (!cell || cell.tagName !== 'TD') {
+            return false;
+        }
+        if (cell.classList.contains('kit-checkbox-only-cell') || cell.classList.contains('bulk-checkbox-cell')) {
+            return !!cell.querySelector('input[type="checkbox"]');
+        }
+        var boxes = cell.querySelectorAll('input[type="checkbox"]');
+        if (boxes.length !== 1) {
+            return false;
+        }
+        // Reject cells that mix the checkbox with other controls/links.
+        return !cell.querySelector('a[href], button, input:not([type="checkbox"]), select, textarea');
+    }
+
+    document.addEventListener('click', function (e) {
+        var cell = e.target && e.target.closest ? e.target.closest('td') : null;
+        if (!cell || !isCheckboxOnlyRowCell(cell)) {
+            return;
+        }
+
+        // Native toggle when the checkbox or its label is the click target.
+        if (e.target.closest('input[type="checkbox"], label')) {
+            return;
+        }
+
+        var checkbox = cell.querySelector('input[type="checkbox"]');
+        if (!checkbox || checkbox.disabled || isSelectAllCheckbox(checkbox)) {
+            return;
+        }
+
+        e.preventDefault();
+        e.stopPropagation();
+        checkbox.checked = !checkbox.checked;
+        checkbox.dispatchEvent(new Event('change', { bubbles: true }));
+        checkbox.dispatchEvent(new Event('input', { bubbles: true }));
+    });
+})();

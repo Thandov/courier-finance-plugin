@@ -166,7 +166,11 @@ if (isset($_GET['selected_ids']) || isset($_POST['bulk_ids'])) {
                 c.email_address AS customer_email,
                 c.cell AS customer_phone,
                 c.address AS customer_address,
-                c.company_name,
+                COALESCE(NULLIF(co.company_name, ''), NULLIF(cust_co.company_name, '')) AS company_name,
+                c.cust_id AS cust_join_cust_id,
+                c.id AS cust_join_row_id,
+                c2.cust_id AS id_join_cust_id,
+                c2.id AS id_join_row_id,
                 sd.destination_country_id,
                 sd.origin_country_id,
                 dest_country.country_name AS destination_country,
@@ -174,6 +178,9 @@ if (isset($_GET['selected_ids']) || isset($_POST['bulk_ids'])) {
                 city.city_name AS destination_city
             FROM $waybills_table w
             LEFT JOIN $customers_table c ON w.customer_id = c.cust_id
+            LEFT JOIN {$wpdb->prefix}kit_company_customers co ON w.company_id = co.company_id
+            LEFT JOIN {$wpdb->prefix}kit_company_customers cust_co ON c.company_id = cust_co.company_id
+            LEFT JOIN $customers_table c2 ON w.customer_id = c2.id
             LEFT JOIN $deliveries_table d ON w.delivery_id = d.id
             LEFT JOIN $shipping_directions_table sd ON d.direction_id = sd.id
             LEFT JOIN $cities_table city ON w.city_id = city.id
@@ -186,20 +193,126 @@ if (isset($_GET['selected_ids']) || isset($_POST['bulk_ids'])) {
         $waybills = $wpdb->get_results($query);
 
         if (!empty($waybills)) {
-            // Bulk invoice must represent one customer only.
+            // Bulk invoice must represent one customer only. Resolve each waybill's customer_id the same way
+            // as the manage list / customer lookup: FK may be kit_customers.cust_id OR kit_customers.id (primary key).
+            $resolve_canonical_cust_id = static function ($wb_row): int {
+                $raw = isset($wb_row->customer_id) ? intval($wb_row->customer_id) : 0;
+                if ($raw <= 0) {
+                    return 0;
+                }
+                $c_match  = isset($wb_row->cust_join_row_id) && $wb_row->cust_join_row_id !== null && intval($wb_row->cust_join_row_id) > 0;
+                $c2_match = isset($wb_row->id_join_row_id) && $wb_row->id_join_row_id !== null && intval($wb_row->id_join_row_id) > 0;
+                $c_row_id  = $c_match ? intval($wb_row->cust_join_row_id) : 0;
+                $c2_row_id = $c2_match ? intval($wb_row->id_join_row_id) : 0;
+                if ($c_match && $c2_match && $c_row_id !== $c2_row_id) {
+                    // Same as manage-waybill customer fallback: prefer cust_id match over id match (admin-pages ORDER BY).
+                    return intval($wb_row->cust_join_cust_id);
+                }
+                if ($c_match) {
+                    return intval($wb_row->cust_join_cust_id);
+                }
+                if ($c2_match) {
+                    return intval($wb_row->id_join_cust_id);
+                }
+
+                return $raw;
+            };
+
             $customer_ids = [];
             foreach ($waybills as $wb_row) {
-                $cid = isset($wb_row->customer_id) ? intval($wb_row->customer_id) : 0;
+                $cid = $resolve_canonical_cust_id($wb_row);
                 if ($cid > 0) {
                     $customer_ids[$cid] = true;
                 }
             }
-            if (count($customer_ids) > 1) {
-                wp_die(
-                    'Selected waybills belong to different customers. Please select waybills for one customer only.',
-                    'Mixed Customers Not Allowed',
-                    ['response' => 400]
-                );
+
+            $try_merge_same_billing_identity = static function (array $cust_ids) use ($wpdb, $customers_table): ?int {
+                $cust_ids = array_values(array_unique(array_filter(array_map('intval', $cust_ids), static function ($v) {
+                    return $v > 0;
+                })));
+                if (count($cust_ids) <= 1) {
+                    return $cust_ids[0] ?? null;
+                }
+                $fingerprint = static function (?array $row): ?string {
+                    if (empty($row) || !is_array($row)) {
+                        return null;
+                    }
+                    $email = strtolower(trim((string)($row['email_address'] ?? '')));
+                    $co    = strtolower(trim((string)($row['company_name'] ?? '')));
+                    $cell  = preg_replace('/\D+/', '', (string)($row['cell'] ?? ''));
+                    $first = strtolower(trim((string)($row['name'] ?? '')));
+                    $last  = strtolower(trim((string)($row['surname'] ?? '')));
+                    if (in_array($co, ['', 'individual', '1ndividual', 'n/a', 'na', 'none', 'private'], true)) {
+                        $co = '';
+                    }
+                    $parts = [];
+                    if ($email !== '') {
+                        $parts[] = 'e:' . $email;
+                    }
+                    if ($co !== '') {
+                        $parts[] = 'c:' . $co;
+                    }
+                    if ($cell !== '') {
+                        $parts[] = 'p:' . $cell;
+                    }
+                    $name_key = $first . '|' . $last;
+                    if ($name_key !== '|') {
+                        $parts[] = 'n:' . $name_key;
+                    }
+                    if (empty($parts)) {
+                        return null;
+                    }
+
+                    return implode("\x1e", $parts);
+                };
+
+                $prints = [];
+                foreach ($cust_ids as $cid) {
+                    $row = $wpdb->get_row(
+                        $wpdb->prepare(
+                            "SELECT email_address, company_name, cell, name, surname FROM $customers_table WHERE cust_id = %d LIMIT 1",
+                            $cid
+                        ),
+                        ARRAY_A
+                    );
+                    $fp = $fingerprint($row);
+                    if ($fp === null) {
+                        return null;
+                    }
+                    $prints[] = $fp;
+                }
+
+                if (count(array_unique($prints)) !== 1) {
+                    return null;
+                }
+
+                sort($cust_ids);
+
+                return (int) $cust_ids[0];
+            };
+
+            $canonical_cust_ids          = array_keys($customer_ids);
+            $invoice_cust_id             = 0;
+            $bulk_invoice_multi_customer = false;
+            $is_wp_admin_bulk            = (class_exists('KIT_User_Roles') && KIT_User_Roles::is_admin())
+                || (function_exists('is_super_admin') && is_super_admin());
+
+            if (count($canonical_cust_ids) > 1) {
+                $merged = $try_merge_same_billing_identity($canonical_cust_ids);
+                if ($merged !== null && $merged > 0) {
+                    $invoice_cust_id = $merged;
+                } elseif ($is_wp_admin_bulk) {
+                    $bulk_invoice_multi_customer = true;
+                    $invoice_cust_id             = 0;
+                } else {
+                    wp_die(
+                        'Selected waybills belong to different customers. Please select waybills for one customer only.',
+                        'Mixed Customers Not Allowed',
+                        ['response' => 400]
+                    );
+                }
+            } elseif (count($canonical_cust_ids) === 1) {
+                $invoice_cust_id = (int) $canonical_cust_ids[0];
             }
 
             // Aggregate SADC across all selected waybills so that e.g. 3 waybills with SADC @ R350 show 3 × 350
@@ -242,12 +355,18 @@ if (isset($_GET['selected_ids']) || isset($_POST['bulk_ids'])) {
                 }
             }
 
-            // Get customer details from first waybill (all should be same customer for bulk invoice)
-            $first_waybill    = $waybills[0];
-            $customer_id      = $first_waybill->customer_id ?? null;
+            // Get customer details (unified cust_id after duplicate merge, if applicable)
+            $first_waybill = $waybills[0];
+            $customer_id   = $invoice_cust_id;
+            if ($customer_id <= 0) {
+                $customer_id = $resolve_canonical_cust_id($first_waybill);
+            }
+            if ($customer_id <= 0) {
+                $customer_id = isset($first_waybill->customer_id) ? intval($first_waybill->customer_id) : null;
+            }
             $customer_details = null;
 
-            if ($customer_id) {
+            if ($customer_id && !$bulk_invoice_multi_customer) {
                 $customer_details = $wpdb->get_row(
                     $wpdb->prepare(
                         "SELECT * FROM $customers_table WHERE cust_id = %d LIMIT 1",
@@ -298,12 +417,39 @@ if (isset($_GET['selected_ids']) || isset($_POST['bulk_ids'])) {
                 $grand_total = 0.0;
             }
 
+            // One PDF section per destination city (operating city); blank → Unassigned city.
+            $bulk_city_label = static function ($wb): string {
+                $c = trim((string)($wb->destination_city ?? ''));
+
+                return $c !== '' ? $c : 'Unassigned city';
+            };
+            $waybills_by_city = [];
+            foreach ($waybills as $_wb) {
+                $_ck = $bulk_city_label($_wb);
+                if (!isset($waybills_by_city[$_ck])) {
+                    $waybills_by_city[$_ck] = [];
+                }
+                $waybills_by_city[$_ck][] = $_wb;
+            }
+
             $dompdf = new Dompdf($options);
 
             ob_start();
 
             $invoice_number = 'BULK-' . date('Ymd-His');
             $invoice_date   = date('F j, Y');
+
+            $charges_breakdown_colspan = !empty($bulk_invoice_multi_customer) ? 8 : 7;
+            $charges_total_label_colspan = !empty($bulk_invoice_multi_customer) ? 7 : 6;
+            $waybill_row_customer_label  = static function ($wb): string {
+                $co = trim((string)($wb->company_name ?? ''));
+                $generic_co = ['individual', '1ndividual', 'private', 'n/a', 'na', 'none', '-', '--'];
+                if ($co !== '' && !in_array(strtolower($co), $generic_co, true)) {
+                    return $co;
+                }
+
+                return trim((string)(($wb->customer_name ?? '') . ' ' . ($wb->customer_surname ?? '')));
+            };
 
             // Get terms from company or use default
             $kit_terms = !empty($company['terms_and_conditions']) ? $company['terms_and_conditions'] : '';
@@ -502,16 +648,31 @@ if (isset($_GET['selected_ids']) || isset($_POST['bulk_ids'])) {
     overflow-wrap: anywhere;
   }
 
-  .charges-table .col-description { width: 14%; }
-  .charges-table .col-waybill     { width: 13%; }
-  .charges-table .col-dimensions  { width: 21%; }
-  .charges-table .col-mass        { width: 12%; }
-  .charges-table .col-volume      { width: 12%; }
-  .charges-table .col-amount      { width: 14%; }
-  .charges-table .col-subtotal    { width: 14%; }
+  .charges-table .col-description { width: 12%; }
+  .charges-table .col-waybill     { width: 11%; }
+  .charges-table .col-customer   { width: 16%; }
+  .charges-table .col-dimensions  { width: 18%; }
+  .charges-table .col-mass        { width: 10%; }
+  .charges-table .col-volume      { width: 10%; }
+  .charges-table .col-amount      { width: 12%; }
+  .charges-table .col-subtotal    { width: 12%; }
 
   [style*='box-shadow'] {
     box-shadow: none !important;
+  }
+
+  .bulk-invoice-city-section--break {
+    page-break-before: always;
+    break-before: page;
+  }
+
+  .bulk-invoice-city-heading {
+    font-size: 13px;
+    font-weight: 700;
+    color: <?php echo $secondary_color; ?>;
+    margin: 10px 0 6px 0;
+    padding: 6px 0;
+    border-bottom: 2px solid <?php echo $primary_color; ?>;
   }
 </style>
 <!-- PAGE CONTAINER -->
@@ -526,12 +687,15 @@ if (isset($_GET['selected_ids']) || isset($_POST['bulk_ids'])) {
           </td>
           <td style="width:60%;vertical-align:middle;text-align:right;">
             <div style="font-size:18px;font-weight:bold;color:<?= $pTextColor ?> ;text-transform:uppercase; margin-bottom:4px;">
-              Bulk Invoice
+              <?= !empty($bulk_invoice_multi_customer) ? 'Combined bulk invoice' : 'Bulk Invoice' ?>
             </div>
             <div style="font-size:10px;color:#666; padding:6px;">
               <div><strong>Invoice #:</strong> <?= $invoice_number ?></div>
               <div><strong>Date:</strong> <?= $invoice_date ?></div>
               <div><strong>Waybills:</strong> <?= count($waybills) ?></div>
+              <?php if (!empty($bulk_invoice_multi_customer)): ?>
+              <div><strong>Customers:</strong> <?= (int) count($canonical_cust_ids) ?></div>
+              <?php endif; ?>
             </div>
           </td>
         </tr>
@@ -553,7 +717,10 @@ if (isset($_GET['selected_ids']) || isset($_POST['bulk_ids'])) {
           <td style="width:50%;background:#f8f9fa;border:1px solid #e9ecef;border-radius:4px;padding:8px;">
             <div style="font-size:13px;font-weight:bold;color:<?= $pTextColor ?> ;text-transform:uppercase; margin-bottom:4px;">Bill To</div>
             <div style="font-size:10px; line-height:1.3;">
-              <?php if ($customer_details): ?>
+              <?php if (!empty($bulk_invoice_multi_customer)): ?>
+                <strong>Multiple customers</strong><br>
+                <span class="muted">Bill-to lines in this table are shown per waybill.</span>
+              <?php elseif ($customer_details): ?>
                 <strong><?= esc_html($customer_details['company_name'] ?? trim(($customer_details['name'] ?? '') . ' ' . ($customer_details['surname'] ?? ''))) ?></strong><br>
                 <?php if (!empty($customer_details['company_name'])): ?>
                   <?= esc_html(trim(($customer_details['name'] ?? '') . ' ' . ($customer_details['surname'] ?? ''))) ?><br>
@@ -575,38 +742,70 @@ if (isset($_GET['selected_ids']) || isset($_POST['bulk_ids'])) {
         </tr>
       </table>
 
-      <!-- Charges Breakdown - Matching pdf-generator.php style -->
-      <table class="charges-table" cellpadding="0" cellspacing="0">
+      <?php
+        $bulk_city_idx = 0;
+      foreach ($waybills_by_city as $bulk_city_title => $city_waybills) :
+            $bulk_city_idx++;
+            $city_line_total = 0.0;
+            foreach ($city_waybills as $_cw) {
+                $_wk = (string)($_cw->waybill_no ?? '');
+                $city_line_total += floatval($row_amounts[$_wk] ?? 0);
+            }
+      ?>
+      <div class="bulk-invoice-city-section<?= $bulk_city_idx > 1 ? ' bulk-invoice-city-section--break' : '' ?>">
+        <div class="bulk-invoice-city-heading"><?= esc_html('City: ' . $bulk_city_title) ?> — <?= (int) count($city_waybills) ?> waybill<?php echo count($city_waybills) === 1 ? '' : 's'; ?></div>
+        <table class="charges-table" cellpadding="0" cellspacing="0">
         <tr>
-          <td colspan="7" style="font-size:12px;font-weight:bold;color:<?= $pTextColor ?> ;padding-bottom:4px;">Charges Breakdown</td>
+          <td colspan="<?= (int) $charges_breakdown_colspan ?>" style="font-size:12px;font-weight:bold;color:<?= $pTextColor ?> ;padding-bottom:4px;">Charges breakdown</td>
         </tr>
         <tr class="scolor" style="color:#fff;font-size:11px;">
           <th align="left" class="thr col-description">Description</th>
           <th class="thr col-waybill" align="left">Waybill #</th>
+          <?php if (!empty($bulk_invoice_multi_customer)): ?>
+          <th class="thr col-customer" align="left">Customer</th>
+          <?php endif; ?>
           <th class="thr col-dimensions" align="center">Dimensions (cm)</th>
           <th class="thr col-mass" align="center">Mass (kg)</th>
           <th class="thr col-volume" align="center">Volume (m³)</th>
           <th class="thr col-amount" align="right">Amount (R)</th>
           <th class="thr col-subtotal" align="right">Subtotal (R)</th>
         </tr>
-        
-        <?php foreach ($waybills as $waybill): 
+
+        <?php foreach ($city_waybills as $waybill) :
           $length = floatval($waybill->item_length ?? 0);
           $width  = floatval($waybill->item_width ?? 0);
           $height = floatval($waybill->item_height ?? 0);
           $mass   = floatval($waybill->total_mass_kg ?? 0);
           $volume = floatval($waybill->total_volume ?? 0);
-          $dimensions_display = ($length > 0 && $width > 0 && $height > 0) 
+            $dimensions_display = ($length > 0 && $width > 0 && $height > 0)
             ? number_format($length, 0) . ' × ' . number_format($width, 0) . ' × ' . number_format($height, 0)
             : 'N/A';
-        ?>
+            ?>
           <tr style="font-size:13px; background:#f9fafb; border-bottom:1px solid #e0e7ef;">
             <td class="cellStyle fstCol">
-              <span style="display:inline-block;background:<?= $lightBadge ?>; color:<?= $pTextColor ?>; font-size:11px;padding:2px 8px;border-radius:6px;font-weight:600;">Transport</span>
+              <?php
+              $bulk_basis = strtolower(trim((string) ($waybill->charge_basis ?? '')));
+              if ($bulk_basis === 'weight') {
+                  $bulk_basis = 'mass';
+              }
+              if ($bulk_basis !== 'mass' && $bulk_basis !== 'volume') {
+                  $mc = floatval($waybill->mass_charge ?? 0);
+                  $vc = floatval($waybill->volume_charge ?? 0);
+                  $bulk_basis = ($mc >= $vc) ? 'mass' : 'volume';
+              }
+              // Mel (2026-08-05): generic transport label only — no goods description.
+              $bulk_transport_label = 'Transport - ' . ucfirst($bulk_basis) . ' Charge';
+              ?>
+              <span style="display:inline-block;background:<?= $lightBadge ?>; color:<?= $pTextColor ?>; font-size:11px;padding:2px 8px;border-radius:6px;font-weight:600;"><?= esc_html($bulk_transport_label) ?></span>
             </td>
             <td class="cellStyle">
               <span style="font-weight:600;">#<?= esc_html($waybill->waybill_no) ?></span>
             </td>
+            <?php if (!empty($bulk_invoice_multi_customer)): ?>
+            <td class="cellStyle" style="font-size:10px;">
+              <?= esc_html($waybill_row_customer_label($waybill) ?: '—') ?>
+            </td>
+            <?php endif; ?>
             <td class="cellStyle aligncenter" style="font-size:10px;">
               <?= esc_html($dimensions_display) ?>
             </td>
@@ -638,19 +837,28 @@ if (isset($_GET['selected_ids']) || isset($_POST['bulk_ids'])) {
             </td>
           </tr>
         <?php endforeach; ?>
-        
-        <?php
-        // Grouped processing rows (VAT/SAD500/SADC) are intentionally not shown on bulk invoices.
-        // Those charges are applied/visible at individual waybill level only.
-        ?>
-        
-        <!-- TOTAL ROW -->
+
+        <?php if ($can_see_prices): ?>
+        <tr style="background:#eef2f7; font-weight:600;">
+          <td class="cellStyle" colspan="<?= (int) $charges_total_label_colspan ?>" style="text-align:right;font-size:11px;">City subtotal — <?= esc_html($bulk_city_title) ?></td>
+          <td class="cellStyle" style="text-align:right;font-size:11px; white-space:nowrap;">R <?= number_format($city_line_total, 2, '.', ',') ?></td>
+        </tr>
+        <?php else: ?>
+        <tr style="background:#eef2f7;">
+          <td class="cellStyle" colspan="<?= (int) $charges_total_label_colspan ?>" style="text-align:right;font-size:11px;">City subtotal — <?= esc_html($bulk_city_title) ?></td>
+          <td class="cellStyle" style="text-align:right;font-size:11px;">N/A</td>
+        </tr>
+        <?php endif; ?>
+        </table>
+      </div>
+      <?php endforeach; ?>
+
+      <table class="charges-table" cellpadding="0" cellspacing="0" style="margin-top:10px;">
         <?php if ($can_see_prices): ?>
         <tr class="rowTotal pcolor">
-          <td class="cellStyle" colspan="6" style="font-size:14px; font-weight:700;">TOTAL</td>
+          <td class="cellStyle" colspan="<?= (int) $charges_total_label_colspan ?>" style="font-size:14px; font-weight:700;">INVOICE TOTAL (all cities)</td>
           <td class="cellStyle" style="text-align:right; font-size:14px; font-weight:700; white-space:nowrap;">
-            <?php 
-            // Ensure grand_total is calculated and formatted correctly
+            <?php
             $display_total = isset($grand_total) ? number_format(floatval($grand_total), 2, '.', ',') : '0.00';
             echo 'R ' . $display_total;
             ?>
@@ -658,7 +866,7 @@ if (isset($_GET['selected_ids']) || isset($_POST['bulk_ids'])) {
         </tr>
         <?php else: ?>
         <tr class="rowTotal pcolor">
-          <td class="cellStyle" colspan="6" style="font-size:14px; font-weight:700;">TOTAL</td>
+          <td class="cellStyle" colspan="<?= (int) $charges_total_label_colspan ?>" style="font-size:14px; font-weight:700;">INVOICE TOTAL (all cities)</td>
           <td class="cellStyle" style="text-align:right; font-size:14px; font-weight:700; white-space:nowrap;">N/A</td>
         </tr>
         <?php endif; ?>

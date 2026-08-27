@@ -5,11 +5,7 @@ if (! defined('ABSPATH')) {
     require_once dirname(__FILE__, 4) . '/wp-load.php';
 }
 
-// Permission: Managers, Data Capturers, and Admins
-if (! class_exists('KIT_User_Roles')) {
-    wp_die('Access denied', 403);
-}
-if (! (KIT_User_Roles::is_admin() || KIT_User_Roles::is_manager() || KIT_User_Roles::is_data_capturer())) {
+if (!class_exists('KIT_User_Roles')) {
     wp_die('Access denied', 403);
 }
 
@@ -24,7 +20,21 @@ if (! $data || empty($data->waybill)) {
 }
 
 $w = (object) $data->waybill;
-$items = is_array($data->items) ? $data->items : [];
+
+$is_portal = is_user_logged_in()
+    && KIT_User_Roles::is_portal_customer()
+    && KIT_User_Roles::can_access_customer_portal()
+    && KIT_User_Roles::get_portal_customer_id() > 0;
+
+if ($is_portal) {
+    if ((int) ($w->customer_id ?? 0) !== KIT_User_Roles::get_portal_customer_id()) {
+        wp_die('Access denied', 403);
+    }
+} elseif (!(KIT_User_Roles::is_admin() || KIT_User_Roles::is_manager() || KIT_User_Roles::is_data_capturer())) {
+    wp_die('Access denied', 403);
+}
+
+$items = is_array($data->items) ? $data->items : array();
 
 if (! class_exists('KIT_Deliveries')) {
     require_once __DIR__ . '/includes/deliveries/deliveries-functions.php';

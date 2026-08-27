@@ -1,9 +1,6 @@
 <?php
 // waybill-form.php
-// Start session at the very top to preserve form data - TEMPORARILY DISABLED FOR DEBUGGING
-// if (!session_id()) {
-//     session_start();
-// }
+// Session start and step POST→session persistence are disabled; $form_data stays empty until re-enabled.
 
 if (!defined('ABSPATH')) {
     exit;
@@ -40,29 +37,6 @@ if (!function_exists('tholaMaCustomer')) {
     return;
 }
 
-// Handle form submissions between steps - TEMPORARILY DISABLED FOR DEBUGGING
-// if ($_SERVER['REQUEST_METHOD'] === 'POST') {
-//     // Save all submitted data to session
-//     $_SESSION['waybill_form_data'] = array_merge($_SESSION['waybill_form_data'] ?? [], $_POST);
-
-//     // Handle step navigation
-//     $current_step = isset($_POST['current_step']) ? intval($_POST['current_step']) : 1;
-
-//     if (isset($_POST['next_step'])) {
-//         $next_step = min($current_step + 1, 4);
-//     } elseif (isset($_POST['prev_step'])) {
-//         $next_step = max($current_step - 1, 1);
-//     } else {
-//         $next_step = $current_step;
-//     }
-
-//     // Redirect to the next step
-//     wp_redirect(add_query_arg(['step' => $next_step], wp_get_referer()));
-//     exit;
-// }
-
-// Restore form data from session - TEMPORARILY DISABLED FOR DEBUGGING
-// $form_data = $_SESSION['waybill_form_data'] ?? [];
 $form_data = [];
 
 
@@ -130,6 +104,28 @@ if (isset($_GET['cust_id'])) {
     $set_cust_id = 0;
 }
 
+$kit_booking_request_id = isset($_GET['booking_request_id']) ? (int) $_GET['booking_request_id'] : 0;
+if (!$is_edit_mode && $kit_booking_request_id > 0 && class_exists('KIT_Booking_Requests')) {
+    $kit_booking = KIT_Booking_Requests::get($kit_booking_request_id);
+    if (is_array($kit_booking)) {
+        if ((int) $set_cust_id <= 0) {
+            $set_cust_id = (int) ($kit_booking['customer_id'] ?? 0);
+        }
+        $notes = KIT_Booking_Requests::format_notes_for_waybill($kit_booking);
+        if (!is_array($waybill)) {
+            $waybill = array();
+        }
+        if (empty($waybill['waybill_description'])) {
+            $waybill['waybill_description'] = $notes;
+        }
+        $waybill['origin_country'] = (int) ($kit_booking['origin_country_id'] ?? 0);
+        $waybill['origin_city'] = (int) ($kit_booking['origin_city_id'] ?? 0);
+        $waybill['destination_country'] = (int) ($kit_booking['destination_country_id'] ?? 0);
+        $waybill['destination_city'] = (int) ($kit_booking['destination_city_id'] ?? 0);
+        $GLOBALS['kit_booking_waybill_notes'] = $notes;
+    }
+}
+
 
 // Debug: Try to get customer name
 try {
@@ -170,15 +166,34 @@ $waybill_create_reload_base = (function_exists('kit_using_employee_portal') && k
     ? esc_url(kit_employee_portal_url('08600-waybill-create'))
     : esc_url(admin_url('admin.php')) . '?page=08600-waybill-create';
 
+require_once COURIER_FINANCE_PLUGIN_PATH . 'includes/components/edit-waybill/kit-edit-waybill-templates.php';
+$kit_create_template_id = kit_edit_waybill_get_active_template_id();
+$kit_waybill_create_flat = ($kit_create_template_id === 'edit_waybill_template2');
+$GLOBALS['kit_waybill_create_flat'] = $kit_waybill_create_flat;
+if ($kit_waybill_create_flat && function_exists('wp_enqueue_style')) {
+    wp_enqueue_style(
+        'kit-waybill-template2',
+        COURIER_FINANCE_PLUGIN_URL . 'assets/css/kit-waybill-template2.css',
+        [],
+        '1.0.1'
+    );
+    if (function_exists('wp_print_styles')) {
+        wp_print_styles(['kit-waybill-template2']);
+    }
+}
+
 ?>
 
 <div class="wrap">
     <div class="<?php echo KIT_Commons::containerClasses(); ?>">
         <?php
         echo KIT_Commons::showingHeader([
-            'title' => 'Capturess New Waybill',
-            'desc' => ''
+            'title' => 'Capture New Waybill',
+            'desc' => $kit_waybill_create_flat
+                ? 'One page: customer, trip, charges, then create.'
+                : ''
         ]);
+        kit_edit_waybill_render_switcher($kit_create_template_id);
         ?>
         <div class="ajaxReload mx-auto max-w-7xl">
             <?php
@@ -203,7 +218,7 @@ $waybill_create_reload_base = (function_exists('kit_using_employee_portal') && k
                         'create-delivery-modal',
                         'Create New Delivery',
                         $delivery_form_content,
-                        '3xl',
+                        'lg',
                         false,
                         ''
                     );
@@ -233,105 +248,6 @@ $waybill_create_reload_base = (function_exists('kit_using_employee_portal') && k
                         <p class="text-bold mb-4">Request management to create a delivery to proceed with creating a waybill.</p>
                     <?php endif; ?>
                 </div>
-                <script>
-                    // Populate delivery form with dummy data for testing when modal opens
-                    (function() {
-                        function populateDeliveryForm() {
-                            // Destination Country: Tanzania (ID: 2)
-                            const destinationCountrySelect = document.getElementById('destination_country_select');
-                            if (destinationCountrySelect && destinationCountrySelect.value !== '2') {
-                                destinationCountrySelect.value = '2'; // Tanzania
-                                console.log('✅ Set destination country to Tanzania (ID: 2)');
-
-                                // Trigger change to load cities
-                                const changeEvent = new Event('change', {
-                                    bubbles: true
-                                });
-                                destinationCountrySelect.dispatchEvent(changeEvent);
-
-                                // Wait for cities to load, then set Arusha
-                                setTimeout(function() {
-                                    const destinationCitySelect = document.getElementById('destination_city_select');
-                                    if (destinationCitySelect) {
-                                        // Try to find Arusha by text or set ID 8
-                                        let found = false;
-                                        for (let option of destinationCitySelect.options) {
-                                            const optionText = option.textContent.toLowerCase().trim();
-                                            if (optionText.includes('arusha') || option.value === '8') {
-                                                destinationCitySelect.value = option.value;
-                                                found = true;
-                                                console.log('✅ Set destination city to Arusha (ID: ' + option.value + ')');
-                                                break;
-                                            }
-                                        }
-                                        if (!found) {
-                                            console.warn('⚠️ Arusha not found in city dropdown');
-                                        }
-                                    }
-                                }, 600);
-                            }
-
-                            // Dispatch Date: 25 Nov 2025
-                            const dispatchDate = document.getElementById('dispatch_date');
-                            if (dispatchDate && !dispatchDate.value) {
-                                dispatchDate.value = '2025-11-25';
-                                console.log('✅ Set dispatch date to 2025-11-25');
-                            }
-
-                            // Driver: James (ID: 3)
-                            const driverSelect = document.getElementById('driver_id');
-                            if (driverSelect && driverSelect.value !== '3') {
-                                // Try to find James by name or ID
-                                let found = false;
-                                for (let option of driverSelect.options) {
-                                    const optionText = option.textContent.toLowerCase().trim();
-                                    if (optionText.includes('james') || option.value === '3') {
-                                        driverSelect.value = option.value;
-                                        found = true;
-                                        console.log('✅ Set driver to James (ID: ' + option.value + ')');
-                                        break;
-                                    }
-                                }
-                                if (!found) {
-                                    console.warn('⚠️ Driver James not found in dropdown');
-                                }
-                            }
-                        }
-
-                        // Watch for modal opening
-                        document.addEventListener('DOMContentLoaded', function() {
-                            const modal = document.getElementById('create-delivery-modal');
-                            if (modal) {
-                                // Use MutationObserver to detect when modal becomes visible
-                                const observer = new MutationObserver(function(mutations) {
-                                    if (modal.classList.contains('flex') && !modal.classList.contains('hidden')) {
-                                        // Modal is open, populate fields after a short delay
-                                        setTimeout(populateDeliveryForm, 200);
-                                    }
-                                });
-
-                                // Start observing
-                                observer.observe(modal, {
-                                    attributes: true,
-                                    attributeFilter: ['class']
-                                });
-
-                                // Also listen for click events on the modal open button
-                                const openButton = document.querySelector('[modal="create-delivery-modal"], [data-modal="create-delivery-modal"], .create-delivery-btn');
-                                if (openButton) {
-                                    openButton.addEventListener('click', function() {
-                                        setTimeout(populateDeliveryForm, 400);
-                                    });
-                                }
-
-                                // Also try to populate if modal is already open (for page refreshes)
-                                if (modal.classList.contains('flex') && !modal.classList.contains('hidden')) {
-                                    setTimeout(populateDeliveryForm, 500);
-                                }
-                            }
-                        });
-                    })();
-                </script>
             <?php endif; ?>
         </div>
 
@@ -347,41 +263,45 @@ $waybill_create_reload_base = (function_exists('kit_using_employee_portal') && k
 
 
 
-                // Handle dropdown changes
-                if (customerSelect) {
+                // Legacy: real <select id="customer-select"> with <option data-*>. The multi-step waybill
+                // UI uses a hidden <input id="customer-select"> — no .options; firing change from tools like
+                // Fake Fill must not touch this branch (would throw on this.options[this.selectedIndex]).
+                if (customerSelect && customerSelect.tagName === 'SELECT' && customerSelect.options) {
                     customerSelect.addEventListener('change', function() {
                         const selectedOption = this.options[this.selectedIndex];
+                        if (!selectedOption) {
+                            return;
+                        }
 
-                        // Access data-* attributes
                         const name = selectedOption.getAttribute('data-name');
                         const surname = selectedOption.getAttribute('data-surname');
                         const cell = selectedOption.getAttribute('data-cell');
                         const address = selectedOption.getAttribute('data-address');
                         const companyName = selectedOption.getAttribute('data-company-name');
 
-
                         if (this.value === 'new') {
-                            // Clear all fields for new customer
-                            nameInput.value = '';
-                            surnameInput.value = '';
-                            cellInput.value = '';
-                            addressInput.value = '';
-                            custIdInput.value = '0';
+                            if (nameInput) nameInput.value = '';
+                            if (surnameInput) surnameInput.value = '';
+                            if (cellInput) cellInput.value = '';
+                            if (addressInput) addressInput.value = '';
+                            if (custIdInput) custIdInput.value = '0';
 
-                            // Clear company name field
                             const companyNameInput = document.getElementById('company_name');
                             if (companyNameInput) {
                                 companyNameInput.value = '';
                             }
                         } else if (this.value) {
-                            // Populate fields with selected customer data
-                            jQuery("#customer_name").value = name;
-                            jQuery("#customer_surname").value = surname;
-                            cellInput.value = cell || '';
-                            addressInput.value = address || '';
-                            custIdInput.value = '0';
+                            if (window.jQuery) {
+                                jQuery('#customer_name').val(name || '');
+                                jQuery('#customer_surname').val(surname || '');
+                            } else {
+                                if (nameInput) nameInput.value = name || '';
+                                if (surnameInput) surnameInput.value = surname || '';
+                            }
+                            if (cellInput) cellInput.value = cell || '';
+                            if (addressInput) addressInput.value = address || '';
+                            if (custIdInput) custIdInput.value = this.value;
 
-                            // Populate company name field
                             const companyNameInput = document.getElementById('company_name');
                             if (companyNameInput) {
                                 companyNameInput.value = companyName || '';
@@ -389,16 +309,20 @@ $waybill_create_reload_base = (function_exists('kit_using_employee_portal') && k
                         }
                     });
 
-                    // Check for initial customer ID on page load
-                    const initialCustomerId = custIdInput.value;
+                    const initialCustomerId = custIdInput ? custIdInput.value : '';
                     if (initialCustomerId && initialCustomerId !== '0') {
-                        populateCustomerDetails(initialCustomerId);
+                        if (typeof populateCustomerDetails === 'function') {
+                            populateCustomerDetails(initialCustomerId);
+                        } else if (customerSelect.value !== initialCustomerId) {
+                            customerSelect.value = initialCustomerId;
+                            customerSelect.dispatchEvent(new Event('change', { bubbles: true }));
+                        }
                     }
                 }
 
                 // Handle delivery creation form submission via AJAX
                 // Use a more specific selector and higher priority
-                jQuery(document).on('submit', '#create-delivery-modal #edit-delivery-form', function(e) {
+                jQuery(document).on('submit', '#create-delivery-modal form[id^="create-delivery-form"], #create-delivery-modal form[id^="edit-delivery-form"]', function(e) {
                     e.preventDefault();
                     e.stopPropagation();
                     e.stopImmediatePropagation();

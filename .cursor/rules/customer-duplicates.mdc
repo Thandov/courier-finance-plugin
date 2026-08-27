@@ -1,0 +1,34 @@
+---
+description: Prevent duplicate customers; merge/transfer waybills before delete
+alwaysApply: true
+---
+
+# Customers: No Near-Duplicates
+
+Near-duplicate people (e.g. “Edwin van den Berg” vs “Edwin Van Der Berg”) and similar company labels must not become separate records with split waybills.
+
+## When creating or editing customers
+
+1. Use `KIT_Customers::normalize_person_name_key()` / `normalize_company_compare_key()` and `customer_name_surname_exists()` / `company_name_exists()` — do not weaken these to exact case-only matches.
+2. Reject saves that collide with an existing or **similar** name; point the user at the existing `cust_id` (or Merge).
+3. Prefer selecting an existing customer on waybill create over inserting a new near-match row.
+
+## When cleaning duplicates
+
+1. **Never** delete a duplicate that still has waybills you want to keep.
+2. Use `KIT_Customers::merge_customers($keep_cust_id, $drop_cust_id)` (admin Merge action): reassigns `kit_waybills.customer_id`, retargets portal `kit_customer_id` meta, then deletes only the duplicate customer row.
+3. Plain Delete still cascades and **destroys** that customer’s waybills — warn and prefer Merge first.
+
+## Setup Seed / ownership verification
+
+After seed merge collapses near-duplicates, verification must accept remaps when
+normalized labels match (`kit_seed_verification_labels_equivalent` /
+identity keys). Do not reintroduce exact sheet-id-only checks that fail on
+“van den” vs “Van Der”.
+
+## Example
+
+```text
+Bad:  create "Edwin Van Der Berg" while "Edwin van den Berg" exists
+Good: block create; Merge duplicate → keep one cust_id → all waybills on the keeper
+```

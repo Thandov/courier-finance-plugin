@@ -133,7 +133,7 @@ foreach ($waybills as $row) {
     ];
 }
 
-// Group waybills by city
+// Group waybills by city, then sort each city by customer name
 $waybills_by_city = [];
 foreach ($waybill_rows as $waybill) {
     $city = $waybill['city'];
@@ -143,8 +143,18 @@ foreach ($waybill_rows as $waybill) {
     $waybills_by_city[$city][] = $waybill;
 }
 
-// Sort cities alphabetically
+// Sort cities alphabetically; waybills by customer name within each city
 ksort($waybills_by_city);
+foreach ($waybills_by_city as &$city_waybills) {
+    usort($city_waybills, static function ($a, $b) {
+        $cmp = strcasecmp($a['customer'], $b['customer']);
+        if ($cmp !== 0) {
+            return $cmp;
+        }
+        return strcasecmp((string) $a['number'], (string) $b['number']);
+    });
+}
+unset($city_waybills);
 
 $totals = [
     'waybills' => KIT_Waybills::calculate_total_waybills($delivery_id),
@@ -382,12 +392,12 @@ ob_start();
     ?>
       <div class="city-section <?= $city_index > 1 ? 'city-page-break' : ''; ?>">
         <h3 style="font-size: 13px; margin-bottom: 8px; color: var(--primary); font-weight: 600;">
-          <?= esc_html($city_name); ?> 
+          <?= esc_html($city_name); ?>
           <span style="font-size: 11px; font-weight: normal; color: #6b7280;">
             (<?= number_format_i18n($city_totals['waybills']); ?> waybill<?= $city_totals['waybills'] != 1 ? 's' : ''; ?>)
           </span>
         </h3>
-        
+
         <table>
           <thead>
             <tr>
